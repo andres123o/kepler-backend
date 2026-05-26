@@ -1,0 +1,30 @@
+{
+  "feature_names": [
+    "usuarios_registro_base",
+    "tasa_basic_a_risk",
+    "tasa_risk_a_fulldata",
+    "tasa_fulldata_a_video",
+    "tasa_video_a_review",
+    "tasa_review_a_aprobado",
+    "tasa_registro_a_aprobado",
+    "mediana_dias_registro_a_full",
+    "pct_perfil_conservador",
+    "pct_perfil_arriesgado",
+    "push_mail_delivered_pre_deposito",
+    "cx_friccion_kyc",
+    "cx_bloqueos",
+    "Tasa_Intervencion_Mensual",
+    "TRM",
+    "Variacion_COLCAP",
+    "semana_del_mes",
+    "dias_habiles_semana",
+    "mes_prima",
+    "registros_ponderados",
+    "aprobados_ponderados",
+    "lag_1_target",
+    "tasa_registro_a_aprobado_ewma_4",
+    "tasa_rechazo_implicita_kyc_ewma_4"
+  ],
+  "target_name": "usuarios_primer_cashin",
+  "version": 5
+}

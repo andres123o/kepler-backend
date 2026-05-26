@@ -1,0 +1,22 @@
+Collecting feedparser
+  Downloading feedparser-6.0.12-py3-none-any.whl.metadata (2.7 kB)
+Collecting sgmllib3k (from feedparser)
+  Downloading sgmllib3k-1.0.0.tar.gz (5.8 kB)
+  Installing build dependencies: started
+  Installing build dependencies: finished with status 'done'
+  Getting requirements to build wheel: started
+  Getting requirements to build wheel: finished with status 'done'
+  Preparing metadata (pyproject.toml): started
+  Preparing metadata (pyproject.toml): finished with status 'done'
+Downloading feedparser-6.0.12-py3-none-any.whl (81 kB)
+Building wheels for collected packages: sgmllib3k
+  Building wheel for sgmllib3k (pyproject.toml): started
+  Building wheel for sgmllib3k (pyproject.toml): finished with status 'done'
+  Created wheel for sgmllib3k: filename=sgmllib3k-1.0.0-py3-none-any.whl size=6104 sha256=053aa48aba6b6efe650a5e8ebce6deb8b77f6abd7a6964e2d9103168658451a9
+  Stored in directory: c:\users\dell\appdata\local\pip\cache\wheels\03\f5\1a\23761066dac1d0e8e683e5fdb27e12de53209d05a4a37e6246
+Successfully built sgmllib3k
+Installing collected packages: sgmllib3k, feedparser
+Successfully installed feedparser-6.0.12 sgmllib3k-1.0.0
+
+[notice] A new release of pip is available: 25.0.1 -> 26.1.1
+[notice] To update, run: C:\Users\DELL\AppData\Local\Programs\Python\Python312\python.exe -m pip install --upgrade pip
