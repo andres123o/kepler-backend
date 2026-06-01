@@ -5,14 +5,11 @@ Lee datos de Supabase + CIO + mercado → llama Claude → devuelve preview.
 
 import json
 import logging
+import re
 from typing import Any
 
 from app.services.anthropic_client import generate_strategy, generate_strategy_enriched, generate_structural_strategy
-from app.services.customerio_client import (
-    get_campaign,
-    get_campaign_nodes_with_content,
-    sync_campaigns_to_supabase,
-)
+from app.services.customerio_fly_client import build_journey
 from app.services.supabase_client import (
     get_campaigns_cache,
     get_funnel_context,
@@ -300,6 +297,199 @@ def _format_funnel_context(context: list[dict[str, Any]]) -> str:
     return "\n".join(lines)
 
 
+# ─── Helpers para formatear journey (fly API) ─────────────────────────────────
+
+def _strip_html(html: str) -> str:
+    """Extrae texto plano de HTML eliminando tags, scripts y CSS."""
+    s = re.sub(r"<style[^>]*>.*?</style>", " ", html, flags=re.DOTALL | re.IGNORECASE)
+    s = re.sub(r"<script[^>]*>.*?</script>", " ", s, flags=re.DOTALL | re.IGNORECASE)
+    s = re.sub(r"<!--.*?-->", " ", s, flags=re.DOTALL)
+    s = re.sub(r"<[^>]+>", " ", s)
+    s = (s.replace("&nbsp;", " ").replace("&amp;", "&")
+          .replace("&lt;", "<").replace("&gt;", ">")
+          .replace("&quot;", '"').replace("&#39;", "'"))
+    return " ".join(s.split())
+
+
+def _format_journey_for_enrichment(journey: dict[str, Any]) -> str:
+    """
+    Convierte el output de build_journey() al texto que recibe generate_strategy_enriched().
+    Incluye estructura completa del journey: delays, condiciones, A/B splits y contenido
+    de mensajes (subject, preheader, body completos — sin truncar).
+    """
+    meta  = journey["meta"]
+    nodes = journey["nodes"]
+
+    lines: list[str] = [
+        f"## {meta['name']} | ID: {meta['id']}",
+        f"Trigger: {meta['trigger']}  |  Goal: {meta['goal']}  |  Estado: {meta['state']}",
+        "",
+    ]
+
+    msg_count = 0
+    for node in nodes:
+        tipo  = node.get("type", "")
+        nombre = node.get("name") or ""
+
+        if tipo in ("delay_action", "delay_seconds_action"):
+            secs = node.get("delay")
+            if secs is not None:
+                secs  = int(secs)
+                horas = secs // 3600
+                mins  = (secs % 3600) // 60
+                if horas >= 24:
+                    dias   = horas // 24
+                    resto  = horas % 24
+                    legible = f"{dias} dia(s)" + (f" {resto}h" if resto else "")
+                elif horas > 0:
+                    legible = f"{horas}h" + (f" {mins}min" if mins else "")
+                else:
+                    legible = f"{mins} minuto(s)"
+                lines.append(f"  [Delay: {legible}]")
+
+        elif tipo == "delay_time_window_action":
+            start = node.get("start_time", "?")
+            end   = node.get("end_time",   "?")
+            zone  = node.get("zone", "")
+            lines.append(f"  [Ventana: {start} -> {end} ({zone})]")
+
+        elif tipo == "conditional_branch_action":
+            conds = node.get("_conditions_decoded")
+            cond_str = json.dumps(conds, ensure_ascii=False) if conds else "(condicion no disponible)"
+            lines.append(f"  [Condicion: {cond_str}]")
+
+        elif tipo == "random_cohort_branch_action":
+            cohorts = node.get("cohorts", [])
+            names   = node.get("cohort_names", [])
+            ramas   = []
+            for idx, pct in enumerate(cohorts):
+                n = names[idx] if idx < len(names) and names[idx] else f"Rama {idx + 1}"
+                ramas.append(f"{n} {pct / 10:.0f}%")
+            lines.append(f"  [A/B Split: {' / '.join(ramas)}]")
+
+        elif tipo == "exit_action":
+            lines.append("  [Salida del journey]")
+
+        elif tipo in ("email_action", "push_action"):
+            msg_count += 1
+            is_email  = tipo == "email_action"
+            node_type = "Email" if is_email else "Push"
+            subject   = (node.get("_subject")   or node.get("subject",        "")).strip()
+            preheader = (node.get("_preheader")  or node.get("preheader_text", "")).strip()
+            body_raw  = (node.get("_body")       or node.get("body",           "")).strip()
+
+            body = _strip_html(body_raw) if is_email and body_raw else body_raw
+
+            lines.append("")
+            lines.append(f"  [{node_type} #{msg_count}] ID_CIO: {node.get('id', '?')} | NOMBRE: \"{nombre}\"")
+            lines.append(f"    subject: \"{subject}\"")
+            if is_email and preheader:
+                lines.append(f"    preheader: \"{preheader}\"")
+            if body:
+                lines.append(f"    body: \"{body}\"")
+            elif is_email:
+                lines.append("    body: (plantilla visual — no disponible)")
+
+        # attribute_update, webhook → omitir (no relevante para optimizacion de copy)
+
+    return "\n".join(lines)
+
+
+def _cuerpo_for_display(propuesta: dict | None, node: dict[str, Any], is_email: bool) -> str:
+    """
+    Devuelve el texto a mostrar en canvas para el campo cuerpo.
+    - Email con propuesta: Claude devolvió HTML → strip para mostrar texto legible
+    - Email sin propuesta: strip del body actual de CIO
+    - Push: texto plano tal cual
+    """
+    raw_cuerpo = propuesta.get("cuerpo", "") if propuesta else ""
+    if not is_email:
+        return raw_cuerpo or (node.get("_body") or node.get("body") or "")
+    from app.services.email_html_patcher import extract_editable_text
+    if raw_cuerpo:
+        # Claude devolvió algo: puede ser HTML o texto plano
+        return extract_editable_text(raw_cuerpo) if raw_cuerpo.lstrip().startswith("<") else raw_cuerpo
+    return _email_body_for_display(node, is_email)
+
+
+def _email_body_for_display(node: dict[str, Any], is_email: bool) -> str:
+    """
+    Para nodos email sin propuesta: extrae texto legible del HTML para el canvas.
+    Para push: devuelve el body tal cual.
+    """
+    raw = node.get("_body") or node.get("body") or ""
+    if not is_email or not raw:
+        return raw
+    from app.services.email_html_patcher import extract_editable_text
+    return extract_editable_text(raw)
+
+
+def _build_nodos_completos(
+    journey: dict[str, Any],
+    propuesta_nodos: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """
+    Lista completa de nodos de mensaje del journey (email/push) para el canvas.
+    Nodos con nombre en propuesta_nodos → modificado=True, usan el copy propuesto.
+    Nodos sin cambios → modificado=False, usan el copy actual del journey (read-only en UI).
+    El delay se infiere del nodo delay_action inmediatamente anterior en la secuencia.
+    """
+    # Índices de lookup: ID exacto (primario) y nombre exacto (fallback)
+    propuesta_by_id: dict[str, dict[str, Any]] = {
+        str(n["id_nodo_cio"]): n for n in propuesta_nodos if n.get("id_nodo_cio")
+    }
+    propuesta_by_nombre: dict[str, dict[str, Any]] = {
+        n["nombre"]: n for n in propuesta_nodos if n.get("nombre")
+    }
+
+    result: list[dict[str, Any]] = []
+    msg_count     = 0
+    pending_delay = 0.0
+
+    for node in journey.get("nodes", []):
+        tipo = node.get("type", "")
+
+        if tipo in ("delay_action", "delay_seconds_action"):
+            secs = node.get("delay") or 0
+            pending_delay = int(secs) / 3600
+        elif tipo == "delay_time_window_action":
+            pass  # no modifica pending_delay; el delay real ya fue capturado por el nodo anterior
+
+        elif tipo in ("email_action", "push_action"):
+            msg_count += 1
+            is_email  = tipo == "email_action"
+            node_id   = str(node.get("id", ""))
+            nombre    = node.get("name") or f"{'Email' if is_email else 'Push'} {msg_count}"
+
+            # Match 1: por ID exacto de CIO (infalible)
+            propuesta = propuesta_by_id.get(node_id)
+            # Match 2: por nombre exacto (fallback si Claude no incluyó id_nodo_cio)
+            if propuesta is None:
+                propuesta = propuesta_by_nombre.get(nombre)
+
+            raw_template_id = node.get("template_id")
+            entry: dict[str, Any] = {
+                "orden":                     msg_count,
+                "id_nodo_cio":               int(node_id) if node_id.isdigit() else None,
+                "template_id":               int(raw_template_id) if raw_template_id else None,
+                "nombre":                    nombre,
+                "tipo":                      "email" if is_email else "push",
+                "delay_desde_anterior_horas": pending_delay,
+                "modificado":                propuesta is not None,
+                "subject": propuesta.get("subject", "") if propuesta else (node.get("_subject") or node.get("subject") or ""),
+                "cuerpo":  _cuerpo_for_display(propuesta, node, is_email),
+            }
+            if is_email:
+                entry["preheader"] = (
+                    propuesta.get("preheader") if propuesta
+                    else (node.get("_preheader") or "")
+                )
+            result.append(entry)
+            pending_delay = 0.0
+
+    return result
+
+
 # ─── Funciones principales ────────────────────────────────────────────────────
 
 def get_funnel_health() -> list[dict[str, Any]]:
@@ -442,7 +632,6 @@ def get_funnel_health() -> list[dict[str, Any]]:
 
 def generate_weekly_strategy(
     contexto_adicional: str | None = None,
-    estructura_campana: str | None = None,
 ) -> dict[str, Any]:
     """
     Genera el preview de estrategia para la semana actual.
@@ -482,10 +671,9 @@ def generate_weekly_strategy(
     # ── FASE 1: Claude con datos resumidos ─────────────────────────────────────
     logger.info("──────────────────────────────────────────────────")
     logger.info("[FASE 1] Enviando a Claude datos resumidos de %d campaña(s)...", len(campaigns))
-    logger.info("[FASE 1] SHAP features: %d | Funnel steps: %d | Contexto adicional: %s | Estructura campaña: %s",
+    logger.info("[FASE 1] SHAP features: %d | Funnel steps: %d | Contexto adicional: %s",
                 len(shap_contexto), len(funnel_steps),
-                "sí" if contexto_adicional else "no",
-                "sí" if estructura_campana else "no")
+                "sí" if contexto_adicional else "no")
 
     strategy = generate_strategy(
         shap_analysis=shap_text,
@@ -494,96 +682,73 @@ def generate_weekly_strategy(
         funnel_context_text=funnel_ctx_text,
         semana_label=semana_label,
         contexto_adicional=contexto_adicional,
-        estructura_campana=estructura_campana,
     )
     strategy["semana_label"] = semana_label
 
-    acciones   = strategy.get("acciones", [])
-    gaps       = strategy.get("gaps", [])
-    logger.info("[FASE 1] Claude devolvió: %d acción(es) | %d gap(s) | estado_funnel=%s",
-                len(acciones), len(gaps), strategy.get("estado_funnel", "?"))
+    acciones = strategy.get("acciones", [])
+    logger.info("[FASE 1] Claude devolvió: %d acción(es) | estado_funnel=%s",
+                len(acciones), strategy.get("estado_funnel", "?"))
     for a in acciones:
         logger.info("[FASE 1]   → %s | %s | campaña_id=%s | tipo=%s",
                     a.get("step_code"), a.get("prioridad"),
                     a.get("campaña_existente_id", "nueva"), a.get("tipo_accion"))
 
-    # ── FASE 2: Enriquecer con template content real ───────────────────────────
+    # ── FASE 2: Auto-fetch del journey completo para campañas seleccionadas ────
     a_enriquecer = [
         a for a in acciones
         if a.get("tipo_accion") in ("optimizar", "reforzar")
         and a.get("campaña_existente_id")
-    ]
+    ][:2]  # Máximo 2 — nunca más, prohibido
 
     logger.info("──────────────────────────────────────────────────")
     if not a_enriquecer:
-        logger.info("[FASE 2] No hay campañas existentes para enriquecer — saltando Fase 2")
+        logger.info("[FASE 2] No hay campañas para enriquecer — saltando")
     else:
-        logger.info("[FASE 2] %d campaña(s) identificadas para enriquecer con copies reales: %s",
+        logger.info("[FASE 2] %d campaña(s) a leer via fly API: %s",
                     len(a_enriquecer),
                     [a["campaña_existente_id"] for a in a_enriquecer])
 
-        enriched_lines: list[str] = []
+        enriched_parts:   list[str]        = []
+        journeys_by_cid:  dict[str, dict]  = {}
 
         for accion in a_enriquecer:
-            cid   = accion["campaña_existente_id"]
+            cid   = str(accion["campaña_existente_id"])
             cname = accion.get("campaña_existente_nombre", cid)
-            logger.info("[FASE 2] Fetching template content para campaña '%s' (ID %s)...", cname, cid)
+            logger.info("[FASE 2] Leyendo journey campaña '%s' (ID %s)...", cname, cid)
 
             try:
-                nodes = get_campaign_nodes_with_content(cid)
-                msg_nodes = [n for n in nodes if n.get("type") in ("push_action", "email_action")]
-
-                logger.info("[FASE 2]   → %d nodo(s) de mensaje encontrados en campaña %s",
-                            len(msg_nodes), cid)
-
-                has_content = any(n.get("subject") for n in msg_nodes)
-                if not has_content:
-                    logger.warning("[FASE 2]   → Sin contenido disponible vía API para campaña %s "
-                                   "(templates no retornan subject — limitación CIO API)", cid)
-                    continue
-
-                enriched_lines.append(f"\nCampaña: '{cname}' (ID {cid})")
-                for n in msg_nodes:
-                    is_email  = n.get("type") == "email_action"
-                    node_type = "Email" if is_email else "Push"
-                    label     = n.get("name") or node_type
-                    subj      = (n.get("subject") or "").strip()
-                    body      = (n.get("body") or "").strip()
-                    pre       = (n.get("preheader") or "").strip()
-
-                    logger.info("[FASE 2]     Nodo '%s' (%s): subject='%s...' preheader=%s body=%s",
-                                label, node_type,
-                                subj[:40] if subj else "(vacío)",
-                                "sí" if pre else "no",
-                                "sí" if body else "no")
-
-                    enriched_lines.append(f"  {label} ({node_type}):")
-                    enriched_lines.append(f"    subject:   \"{subj}\"")
-                    if is_email and pre:
-                        enriched_lines.append(f"    preheader: \"{pre}\"")
-                    if body:
-                        enriched_lines.append(f"    body:      \"{body[:500]}\"")
-                    elif is_email:
-                        enriched_lines.append(f"    body:      (plantilla visual — no disponible en API)")
-
+                journey = build_journey(cid)
+                journeys_by_cid[cid] = journey
+                enriched_parts.append(_format_journey_for_enrichment(journey))
+                msg_nodes = [n for n in journey["nodes"]
+                             if n.get("type") in ("email_action", "push_action")]
+                logger.info("[FASE 2]   → %d nodos totales | %d mensajes leídos",
+                            len(journey["nodes"]), len(msg_nodes))
             except Exception as exc:
-                logger.error("[FASE 2]   → Error obteniendo campaña %s: %s", cid, exc)
+                logger.error("[FASE 2]   → Error leyendo campaña %s: %s", cid, exc)
 
-        if enriched_lines:
-            enriched_text = "\n".join(enriched_lines)
-            logger.info("[FASE 2] Enviando a Claude copies reales de %d campaña(s) para diffs específicos...",
-                        len([l for l in enriched_lines if l.startswith("\nCampaña:")]))
-
+        if enriched_parts:
+            enriched_text = "\n\n".join(enriched_parts)
             strategy = generate_strategy_enriched(
                 phase1_strategy=strategy,
                 enriched_campaigns_text=enriched_text,
                 semana_label=semana_label,
             )
             strategy["semana_label"] = semana_label
-            logger.info("[FASE 2] Estrategia enriquecida con diffs reales de copy")
+
+            # Attachar nodos_completos a cada acción enriquecida para el canvas
+            for accion in strategy.get("acciones", []):
+                cid = str(accion.get("campaña_existente_id") or "")
+                if cid in journeys_by_cid:
+                    propuesta_nodos = (accion.get("propuesta") or {}).get("nodos") or []
+                    accion["nodos_completos"] = _build_nodos_completos(
+                        journeys_by_cid[cid], propuesta_nodos
+                    )
+
+            logger.info("[FASE 2] Estrategia enriquecida con journeys reales de %d campaña(s)",
+                        len(enriched_parts))
         else:
-            logger.warning("[FASE 2] Ninguna campaña retornó contenido — Fase 2 omitida, "
-                           "usando resultado de Fase 1")
+            logger.warning("[FASE 2] Ninguna campaña pudo leerse — usando resultado de Fase 1")
 
     # ── Guardar resultado ──────────────────────────────────────────────────────
     logger.info("──────────────────────────────────────────────────")
@@ -600,12 +765,11 @@ def generate_weekly_strategy(
 
 def generate_structural_optimization(
     phase2_strategy: dict[str, Any],
-    detalle_campanas: str,
     contexto_adicional: str | None = None,
 ) -> dict[str, Any]:
     """
     Fase 2B: analiza campañas que Phase 2 no tocó y propone optimizaciones estructurales.
-    No usa SHAP — usa diagnóstico de salud + detalle de campañas provisto por el usuario.
+    No usa SHAP — lee el journey completo de cada campaña restante via fly API.
     """
     logger.info("══════════════════════════════════════════════════")
     logger.info("[FASE 2B] Iniciando optimización estructural")
@@ -643,6 +807,8 @@ def generate_structural_optimization(
 
     health = get_funnel_health()
     health_lines: list[str] = []
+    campanas_restantes: list[dict[str, Any]] = []  # para el auto-fetch
+
     for step in health:
         for c in step["campaigns"]:
             if str(c["cio_campaign_id"]) in phase2_ids:
@@ -663,17 +829,40 @@ def generate_structural_optimization(
                 + (f" · {n_nodos} nodos" if n_nodos else "")
                 + (f" | ⚠ {warns}" if warns else "")
             )
+            campanas_restantes.append(c)
 
     health_text = (
         "\n".join(health_lines) if health_lines
         else "(no hay campañas fuera del alcance de Phase 2)"
     )
+
+    # ── Auto-fetch: journey completo de cada campaña restante via fly API ────────
+    logger.info("[FASE 2B] Leyendo journeys de %d campaña(s) restantes via fly API...",
+                len(campanas_restantes))
+    journey_parts: list[str] = []
+    journeys_by_cid: dict[str, dict[str, Any]] = {}
+    for c in campanas_restantes:
+        cid   = str(c["cio_campaign_id"])
+        cname = c.get("name", cid)
+        try:
+            journey = build_journey(cid)
+            journey_parts.append(_format_journey_for_enrichment(journey))
+            journeys_by_cid[cid] = journey
+            msg_nodes = [n for n in journey["nodes"]
+                         if n.get("type") in ("email_action", "push_action")]
+            logger.info("[FASE 2B]   → '%s' (ID %s): %d nodos | %d mensajes",
+                        cname, cid, len(journey["nodes"]), len(msg_nodes))
+        except Exception as exc:
+            logger.error("[FASE 2B]   → Error leyendo campaña '%s' (ID %s): %s", cname, cid, exc)
+
+    detalle_campanas = "\n\n".join(journey_parts) if journey_parts else "(no se pudo leer ningún journey)"
+
     kb_text         = _format_knowledge_base(kb_entries)
     funnel_ctx_text = _format_funnel_context(funnel_ctx)
 
     semana_label = phase2_strategy.get("semana_label") or phase2_strategy.get("semana_datos", "")
     logger.info("[FASE 2B] Enviando %d campaña(s) para análisis estructural | semana=%s",
-                len(health_lines), semana_label)
+                len(campanas_restantes), semana_label)
 
     result = generate_structural_strategy(
         funnel_health_text=health_text,
@@ -684,6 +873,15 @@ def generate_structural_optimization(
         contexto_adicional=contexto_adicional,
     )
     result["semana_label"] = semana_label
+
+    # Attachar nodos_completos (con id_nodo_cio y template_id reales) para el canvas del frontend
+    for accion in result.get("acciones", []):
+        cid = str(accion.get("campaña_existente_id") or "")
+        if cid in journeys_by_cid:
+            propuesta_nodos = (accion.get("propuesta") or {}).get("nodos") or []
+            accion["nodos_completos"] = _build_nodos_completos(
+                journeys_by_cid[cid], propuesta_nodos
+            )
 
     # Fase 2B no tiene señal SHAP — nullear para que el badge no aparezca en UI
     for a in result.get("acciones", []):
@@ -712,6 +910,7 @@ def execute_strategy(strategy: dict[str, Any]) -> dict[str, Any]:
     - Anti-duplicado en create_campaign (ver customerio_client.py)
     - Nunca toca la Track API — solo Journeys App API
     """
+    # ⚠️  WRITE — solo se ejecuta si CIO_DRY_RUN=false en .env (bloqueado por defecto)
     from app.services.customerio_client import _MAX_OPS
 
     executed: list[dict] = []
@@ -783,6 +982,8 @@ def _create_journey_from_propuesta(propuesta: dict[str, Any]) -> dict[str, Any]:
     Sigue el patrón de la campaña Kepler v4:
     AB split → [delay + time_window + push + check_cashin] × nodos → exit
     """
+    # ⚠️  WRITE — usa CUSTOMERIO_APP_API_KEY, NO el token sa_live.
+    # Todas estas funciones llaman _guard_write() que bloquea si CIO_DRY_RUN=true.
     from app.services.customerio_client import create_campaign, add_action, add_edge, activate_campaign
 
     config = {
@@ -877,6 +1078,7 @@ def _update_journey_copy(campaign_id: str, propuesta: dict[str, Any]) -> dict[st
     """
     Actualiza el copy de los nodos email/push de una campaña existente.
     """
+    # get_campaign → READONLY (sa_live) | update_action → WRITE (guarded)
     from app.services.customerio_client import get_campaign, update_action
 
     campaign = get_campaign(campaign_id)

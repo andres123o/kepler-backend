@@ -336,6 +336,30 @@ def save_structural_result(result: dict[str, Any]) -> dict[str, Any]:
     return saved
 
 
+def get_user_campaign(user_name: str) -> str | None:
+    """Devuelve el nombre de campaña asignada al usuario, o None si no tiene."""
+    client = _get_client()
+    res = (
+        client.table("user_campaign_assignments")
+        .select("campaign_name")
+        .eq("user_name", user_name)
+        .single()
+        .execute()
+    )
+    return (res.data or {}).get("campaign_name")
+
+
+def get_all_assignments() -> list[dict[str, Any]]:
+    """Devuelve todas las asignaciones usuario → campaña."""
+    client = _get_client()
+    res = (
+        client.table("user_campaign_assignments")
+        .select("user_name, campaign_name")
+        .execute()
+    )
+    return res.data or []
+
+
 def get_latest_structural() -> dict[str, Any] | None:
     """Devuelve el resultado estructural más reciente (Fase 2B), o None si no hay.
     Filtra en Python para consistencia con get_strategy_history."""

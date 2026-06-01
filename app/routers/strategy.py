@@ -12,6 +12,7 @@ from app.services.strategy_agent import (
     get_funnel_health,
 )
 from app.services.supabase_client import (
+    get_all_assignments,
     get_campaigns_cache,
     get_funnel_context,
     get_funnel_steps,
@@ -19,6 +20,7 @@ from app.services.supabase_client import (
     get_latest_strategy,
     get_latest_structural,
     get_strategy_history,
+    get_user_campaign,
 )
 
 router = APIRouter()
@@ -28,13 +30,19 @@ class ExecuteStrategyPayload(BaseModel):
     strategy: dict[str, Any]
 
 
+class UpdateNodePayload(BaseModel):
+    action_id: int    # id_nodo_cio — usado para cooldown y logging
+    template_id: int  # ID del template CIO donde vive el copy
+    subject: str
+    cuerpo: str
+    preheader: str | None = None
+
+
 class GeneratePayload(BaseModel):
     contexto_adicional: str | None = None
-    estructura_campana: str | None = None
 
 
 class GenerateStructuralPayload(BaseModel):
-    detalle_campanas: str
     phase2_strategy: dict[str, Any]
     contexto_adicional: str | None = None
 
@@ -97,25 +105,10 @@ def generate(payload: GeneratePayload | None = None) -> dict[str, Any]:
     Acepta opcionalmente contexto_adicional: noticias, eventos, contexto de negocio.
     """
     try:
-        ctx    = (payload.contexto_adicional or "").strip() if payload else ""
-        struct = (payload.estructura_campana  or "").strip() if payload else ""
-
-        # Máximo 2 campañas en estructura_campana (cada sección empieza con "## C")
-        if struct:
-            n_secciones = sum(1 for line in struct.splitlines() if line.strip().startswith("## C"))
-            if n_secciones > 2:
-                raise HTTPException(
-                    status_code=422,
-                    detail=(
-                        f"estructura_campana tiene {n_secciones} secciones de campaña. "
-                        "El máximo permitido es 2 para evitar alucinaciones. "
-                        "Seleccioná las 2 campañas más relevantes para esta semana."
-                    ),
-                )
+        ctx = (payload.contexto_adicional or "").strip() if payload else ""
 
         return generate_weekly_strategy(
-            contexto_adicional=ctx    or None,
-            estructura_campana=struct or None,
+            contexto_adicional=ctx or None,
         )
     except HTTPException:
         raise
@@ -152,7 +145,6 @@ def generate_structural(payload: GenerateStructuralPayload) -> dict[str, Any]:
         ctx = (payload.contexto_adicional or "").strip() or None
         return generate_structural_optimization(
             phase2_strategy=payload.phase2_strategy,
-            detalle_campanas=payload.detalle_campanas.strip(),
             contexto_adicional=ctx,
         )
     except ValueError as exc:
@@ -214,6 +206,43 @@ def strategy_history() -> list[dict[str, Any]]:
         return get_strategy_history()
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@router.post("/update-node")
+def update_node(payload: UpdateNodePayload) -> dict[str, Any]:
+    """
+    Actualiza el copy de un nodo específico en Customer.io.
+    Máximo 2 requests a CIO por llamada (GET template + PUT template).
+    Cooldown de 30s por nodo para prevenir actualizaciones duplicadas.
+    """
+    from app.services.customerio_fly_writer import update_node_copy
+    try:
+        return update_node_copy(
+            action_id=payload.action_id,
+            template_id=payload.template_id,
+            subject=payload.subject,
+            body=payload.cuerpo,
+            preheader=payload.preheader,
+        )
+    except RuntimeError as exc:
+        # Cooldown activo → 429. Cualquier otro RuntimeError (config, JWT) → 503.
+        status = 429 if "Cooldown activo" in str(exc) else 503
+        raise HTTPException(status_code=status, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
+@router.get("/assignment")
+def get_assignment(user_name: str) -> dict[str, Any]:
+    """Devuelve la campaña asignada al usuario. Usado por el frontend para filtrar canvas."""
+    campaign = get_user_campaign(user_name)
+    return {"user_name": user_name, "campaign": campaign}
+
+
+@router.get("/assignments")
+def get_assignments() -> list[dict[str, Any]]:
+    """Devuelve todas las asignaciones. Solo para admin."""
+    return get_all_assignments()
 
 
 @router.post("/execute")

@@ -2,13 +2,34 @@
 Customer.io App API client para Kepler.
 
 Base URL: https://api.customer.io/v1
-Auth:     Authorization: Bearer <CUSTOMERIO_APP_API_KEY>
 
-SEGURIDAD:
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  TOKENS Y SEGURIDAD — LEE ESTO ANTES DE TOCAR ESTE ARCHIVO
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  CIO_SA_LIVE_READONLY_KEY  (token sa_live)
+  ─────────────────────────────────────────
+  • Token con acceso COMPLETO al backend de CIO (máximos privilegios).
+  • Se usa ÚNICAMENTE en GET requests (_headers_readonly).
+  • NUNCA debe aparecer en POST, PUT, PATCH ni DELETE.
+  • Si este token se usa para escritura → puedes crear/borrar campañas
+    sin querer y disparar envíos masivos a usuarios reales.
+
+  CUSTOMERIO_APP_API_KEY  (token de escritura)
+  ─────────────────────────────────────────────
+  • Token con privilegios de escritura de campañas.
+  • Solo se usa en las funciones de escritura (_headers_write).
+  • Bloqueado por defecto: CIO_DRY_RUN=true en .env impide que
+    cualquier POST/PUT llegue realmente a CIO.
+
+  REGLA DURA: los dos tokens DEBEN ser distintos.
+  Si alguien los configura iguales en .env, el arranque falla
+  con un error explícito (ver validación al final de este bloque).
+
+OTRAS SALVAGUARDAS:
 - Kepler NUNCA llama la Track API (track.customer.io) — esa crea/modifica contactos.
-- Kepler SOLO usa esta App API para leer/crear campañas (journeys).
-- CIO_DRY_RUN=true en .env bloquea TODAS las escrituras (modo seguro por defecto).
-- MAX_CAMPAIGNS_PER_EXECUTE=3 limita cuántas campañas se crean/modifican por llamada.
+- CIO_DRY_RUN=true bloquea TODAS las escrituras (modo seguro por defecto).
+- MAX_CAMPAIGNS_PER_EXECUTE=3 limita cuántas campañas se tocan por llamada.
 """
 
 import os
@@ -31,8 +52,19 @@ load_dotenv(Path(__file__).resolve().parent.parent.parent / ".env")
 
 logger = logging.getLogger("kepler.customerio")
 
-CIO_APP_API_KEY: str = os.getenv("CUSTOMERIO_APP_API_KEY", "")
 CIO_BASE_URL = "https://api.customer.io/v1"
+
+# ── Token de SOLO LECTURA — sa_live ──────────────────────────────────────────
+# ⚠️  ESTE TOKEN TIENE ACCESO COMPLETO A CIO.
+# ⚠️  SOLO PUEDE USARSE EN GET REQUESTS (_headers_readonly).
+# ⚠️  NUNCA PASARLO A POST / PUT / PATCH / DELETE.
+# Nombre variable: CIO_SA_LIVE_READONLY_KEY  (la palabra READONLY es intencional)
+_CIO_READONLY_KEY: str = os.getenv("CIO_SA_LIVE_READONLY_KEY", "")
+
+# ── Token de ESCRITURA ────────────────────────────────────────────────────────
+# Solo se usa en funciones de escritura, que además requieren CIO_DRY_RUN=false.
+# ⚠️  NUNCA poner aquí el valor de CIO_SA_LIVE_READONLY_KEY.
+_CIO_WRITE_KEY: str = os.getenv("CUSTOMERIO_APP_API_KEY", "")
 
 _DRY_RUN: bool = os.getenv("CIO_DRY_RUN", "true").lower() == "true"
 _MAX_OPS = int(os.getenv("CIO_MAX_CAMPAIGNS_PER_EXECUTE", "3"))
@@ -41,14 +73,44 @@ _MAX_OPS = int(os.getenv("CIO_MAX_CAMPAIGNS_PER_EXECUTE", "3"))
 # Protege contra el escenario de Juanita (loop de API duplicando base de contactos).
 _SPIKE_THRESHOLD = int(os.getenv("CIO_SPIKE_THRESHOLD", "10000"))
 
+# ── Validación de seguridad al arranque ──────────────────────────────────────
+# Si ambas keys están configuradas y son iguales → error inmediato.
+# El token sa_live nunca debe usarse para escribir.
+if _CIO_READONLY_KEY and _CIO_WRITE_KEY and _CIO_READONLY_KEY == _CIO_WRITE_KEY:
+    raise RuntimeError(
+        "SEGURIDAD CIO: CIO_SA_LIVE_READONLY_KEY y CUSTOMERIO_APP_API_KEY tienen el mismo valor. "
+        "El token sa_live es de SOLO LECTURA — configura una clave de escritura diferente en .env."
+    )
 
-def _headers() -> dict[str, str]:
-    if not CIO_APP_API_KEY:
+
+def _headers_readonly() -> dict[str, str]:
+    """
+    Headers para GET requests usando el token sa_live (SOLO LECTURA).
+
+    ⚠️  SOLO llamar desde funciones que hacen GET requests.
+    ⚠️  NUNCA usar este header en POST, PUT, PATCH ni DELETE.
+    """
+    key = _CIO_READONLY_KEY or _CIO_WRITE_KEY  # fallback si solo hay una key configurada
+    if not key:
+        raise RuntimeError(
+            "CIO_SA_LIVE_READONLY_KEY no configurada en .env. "
+            "Agrega el token sa_live de CIO para habilitar lectura."
+        )
+    return {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
+
+
+def _headers_write() -> dict[str, str]:
+    """
+    Headers para operaciones de escritura (POST/PUT).
+    Solo llamar DESPUÉS de _guard_write() — que ya bloquea si DRY_RUN=true.
+
+    ⚠️  NUNCA usar _CIO_READONLY_KEY aquí.
+    ⚠️  La validación de arranque ya rechaza keys iguales, pero no confundas las funciones.
+    """
+    key = _CIO_WRITE_KEY or _CIO_READONLY_KEY  # fallback solo en dev sin write key
+    if not key:
         raise RuntimeError("CUSTOMERIO_APP_API_KEY no configurada en .env")
-    return {
-        "Authorization": f"Bearer {CIO_APP_API_KEY}",
-        "Content-Type": "application/json",
-    }
+    return {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
 
 
 def _guard_write(operation: str, detail: str = "") -> None:
@@ -61,10 +123,10 @@ def _guard_write(operation: str, detail: str = "") -> None:
 
 
 def get_campaign(campaign_id: str | int) -> dict[str, Any]:
-    """Obtiene detalle de una campaña por ID."""
+    """Obtiene detalle de una campaña por ID. Solo lectura — usa token sa_live."""
     resp = httpx.get(
         f"{CIO_BASE_URL}/campaigns/{campaign_id}",
-        headers=_headers(),
+        headers=_headers_readonly(),  # ⚠️ READONLY TOKEN — solo GET
         timeout=30,
     )
     resp.raise_for_status()
@@ -85,7 +147,7 @@ def get_campaign_actions_full(campaign_id: str | int) -> list[dict[str, Any]]:
     while True:
         resp = httpx.get(
             f"{CIO_BASE_URL}/campaigns/{campaign_id}/actions",
-            headers=_headers(),
+            headers=_headers_readonly(),  # ⚠️ READONLY TOKEN — solo GET
             params=params,
             timeout=30,
         )
@@ -109,7 +171,7 @@ def get_campaign_nodes_with_content(campaign_id: str | int) -> list[dict[str, An
     Obtiene los nodos de mensaje de una campaña con su contenido completo.
     Usa GET /v1/campaigns/{id}/actions que retorna subject y body reales.
     Los tipos en este endpoint son "push" y "email" (no "push_action"/"email_action").
-    El preheader de email no está disponible en este endpoint.
+    El preheader viene en el campo "preheader_text" (no "preheader").
     """
     import re
 
@@ -144,7 +206,7 @@ def get_campaign_nodes_with_content(campaign_id: str | int) -> list[dict[str, An
             "body":    body,
         }
         if is_email:
-            node["preheader"] = ""  # no disponible en este endpoint
+            node["preheader"] = (a.get("preheader_text") or a.get("preheader") or "").strip()
 
         nodes.append(node)
 
@@ -179,7 +241,7 @@ def create_campaign(config: dict[str, Any]) -> dict[str, Any]:
 
     resp = httpx.post(
         f"{CIO_BASE_URL}/campaigns",
-        headers=_headers(),
+        headers=_headers_write(),  # ⚠️ WRITE TOKEN — protegido por _guard_write() arriba
         json={"campaign": config},
         timeout=60,
     )
@@ -194,7 +256,7 @@ def add_action(campaign_id: str | int, action: dict[str, Any]) -> dict[str, Any]
     _guard_write("add_action", f"campaign={campaign_id} type={action.get('type')}")
     resp = httpx.post(
         f"{CIO_BASE_URL}/campaigns/{campaign_id}/actions",
-        headers=_headers(),
+        headers=_headers_write(),  # ⚠️ WRITE TOKEN — protegido por _guard_write() arriba
         json={"action": action},
         timeout=30,
     )
@@ -214,7 +276,7 @@ def add_edge(campaign_id: str | int, from_id: str, to_id: str,
         edge["index"] = index
     resp = httpx.post(
         f"{CIO_BASE_URL}/campaigns/{campaign_id}/edges",
-        headers=_headers(),
+        headers=_headers_write(),  # ⚠️ WRITE TOKEN — protegido por _guard_write() arriba
         json={"edge": edge},
         timeout=30,
     )
@@ -228,7 +290,7 @@ def update_action(campaign_id: str | int, action_id: str,
     _guard_write("update_action", f"campaign={campaign_id} action={action_id}")
     resp = httpx.put(
         f"{CIO_BASE_URL}/campaigns/{campaign_id}/actions/{action_id}",
-        headers=_headers(),
+        headers=_headers_write(),  # ⚠️ WRITE TOKEN — protegido por _guard_write() arriba
         json={"action": updates},
         timeout=30,
     )
@@ -241,7 +303,7 @@ def activate_campaign(campaign_id: str | int) -> dict[str, Any]:
     _guard_write("activate_campaign", f"campaign={campaign_id}")
     resp = httpx.put(
         f"{CIO_BASE_URL}/campaigns/{campaign_id}",
-        headers=_headers(),
+        headers=_headers_write(),  # ⚠️ WRITE TOKEN — protegido por _guard_write() arriba
         json={"campaign": {"state": "running"}},
         timeout=30,
     )
@@ -267,7 +329,7 @@ def get_campaign_metrics(campaign_id: str | int, weeks: int = 8) -> dict[str, An
     try:
         resp = httpx.get(
             f"{CIO_BASE_URL}/campaigns/{campaign_id}/metrics",
-            headers=_headers(),
+            headers=_headers_readonly(),  # ⚠️ READONLY TOKEN — solo GET
             params={"period": "weeks", "steps": weeks},
             timeout=30,
         )

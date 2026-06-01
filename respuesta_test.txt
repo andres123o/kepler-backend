@@ -1,0 +1,123 @@
+==============================================================
+  Push #1 | Primer depósito | Colombia
+  campaign=4596  action=36707
+  ESCRITURA REAL EN CIO  ⚠
+==============================================================
+
+[1] Leyendo action via App API...
+    GET https://api.customer.io/v1/campaigns/4596/actions/36707
+    → status  : 200
+    → respuesta: {"action":{"id":"36707","campaign_id":4596,"deduplicate_id":"22261:1780176553","name":"Push 1 Push - Primer depósito","layout":"","body":"Los CDTs están al 12% EA, el nivel más alto en años. Si inviertes $1.000.000 hoy, aseguras $120.000 de ganancia al año. Empieza desde $200.000. ¡Es súper fácil!","created":1775671358,"updated":1780176553,"type":"push","sending_state":"automatic","language":"","r
+    tipo=push  nombre='Push 1 Push - Primer depósito'  template_id=22261
+
+[2] Longitud por rama Liquid:
+    OK — subject ≤60 chars, body ≤180 chars por rama.
+
+[3] Auth + leyendo estado actual del template 22261...
+    POST https://us.fly.customer.io/v1/service_accounts/oauth/token  (sa_live → JWT)
+    → status  : 200
+    → JWT obtenido (primeros 30 chars): eyJhbGciOiJFZERTQSIsInR5cCI6Ik...
+    GET https://us.fly.customer.io/v1/environments/112828/templates/22261
+    → status  : 200
+
+[4] Diff — estado actual vs propuesto:
+
+  subject actual    : Llegaste en el momento perfecto 💚
+  subject propuesto : {% if customer.Perfil_de_riesgo == '1. Conservador' %}💰 Tu CDT al 12% EA está listo{% elsif customer.Perfil_de_riesgo == '2. Moderado' or customer.Perfil_de_riesgo == '3. Arriesgado' %}📈 El mercado corrigió: es tu momento{% else %}💚 Llegaste en el momento perfecto{% endif %}
+
+  body actual       : Los CDTs están al 12% EA, el nivel más alto en años. Si inviertes $1.000.000 hoy, aseguras $120.000 de ganancia al año.
+  body propuesto    : {% if customer.Perfil_de_riesgo == '1. Conservador' %}Los CDT siguen por encima del 11% EA mientras el mercado se mueve.
+
+[5] Actualizando action 36707 via fly API...
+
+    [PUT] Leyendo action 36707 completo desde fly API...
+    GET https://us.fly.customer.io/v1/environments/112828/actions/36707
+    → status  : 200
+    → 28 campos leídos: ['action_state', 'campaign_id', 'can_convert', 'created', 'environment_id', 'frequency_cap_mode', 'has_content', 'has_subject', 'holdout', 'id']...
+
+    PUT https://us.fly.customer.io/v1/environments/112828/actions/36707
+    → subject nuevo : {% if customer.Perfil_de_riesgo == '1. Conservador' %}💰 Tu CDT al 12% EA está listo{% elsif customer
+    → body nuevo    : {% if customer.Perfil_de_riesgo == '1. Conservador' %}Los CDT siguen por encima del 11% EA mientras
+    → campos en payload: 29
+    → status  : 200
+    → respuesta: {"action":{"type":"push_action","sub_type":"default","id":"36707","environment_id":112828,"campaign_id":"4596","updated":1779773449,"action_state":"running","created":1775671358,"name":"Push 1 Push - Primer depósito","warnings":null,"position":null,"send_to_unsubscribed":null,"subscription_topic_id":null,"preconditions":"JTVCJTVE","template_id":"22261","tracked":false,"has_content":true,"has_subject":true,"sending_state":"automatic","subject":"Llegaste en el momento perfecto 💚","recipient":"","can_convert":true,"holdout":false,"use_message_limits":null,"override_message_limits_retry":false,"me  
+
+[6] Verificando via App API...
+    GET https://api.customer.io/v1/campaigns/4596/actions/36707
+    → status  : 200
+    → respuesta: {"action":{"id":"36707","campaign_id":4596,"deduplicate_id":"22261:1780176553","name":"Push 1 Push - Primer depósito","layout":"","body":"Los CDTs están al 12% EA, el nivel más alto en años. Si inviertes $1.000.000 hoy, aseguras $120.000 de ganancia al año. Empieza desde $200.000. ¡Es súper fácil!","created":1775671358,"updated":1780176553,"type":"push","sending_state":"automatic","language":"","r
+    → body nuevo    : {% if customer.Perfil_de_riesgo == '1. Conservador' %}Los CDT siguen por encima del 11% EA mientras
+    → campos en payload: 29
+    → status  : 200
+    → respuesta: {"action":{"type":"push_action","sub_type":"default","id":"36707","environment_id":112828,"campaign_id":"4596","updated":1779773449,"action_state":"running","created":1775671358,"name":"Push 1 Push - Primer depósito","warnings":null,"position":null,"send_to_unsubscribed":null,"subscription_topic_id":null,"preconditions":"JTVCJTVE","template_id":"22261","tracked":false,"has_content":true,"has_subject":true,"sending_state":"automatic","subject":"Llegaste en el momento perfecto 💚","recipient":"","can_convert":true,"holdout":false,"use_message_limits":null,"override_message_limits_retry":false,"me  
+
+[6] Verificando via App API...
+    GET https://api.customer.io/v1/campaigns/4596/actions/36707
+    → status  : 200
+    → respuesta: {"action":{"id":"36707","campaign_id":4596,"deduplicate_id":"22261:1780176553","name":"Push 1 Push - Primer depósito","layout":"","body":"Los CDTs están al 12% EA, el nivel más alto en años. Si inviertes $1.000.000 hoy, aseguras $120.000 de ganancia al año. Empieza desde $200.000. ¡Es súper fácil!","created":1775671358,"updated":1780176553,"type":"push","sending_state":"automatic","language":"","r
+[6] Verificando via App API...
+    GET https://api.customer.io/v1/campaigns/4596/actions/36707
+    → status  : 200
+    → respuesta: {"action":{"id":"36707","campaign_id":4596,"deduplicate_id":"22261:1780176553","name":"Push 1 Push - Primer depósito","layout":"","body":"Los CDTs están al 12% EA, el nivel más alto en años. Si inviertes $1.000.000 hoy, aseguras $120.000 de ganancia al año. Empieza desde $200.000. ¡Es súper fácil!","created":1775671358,"updated":1780176553,"type":"push","sending_state":"automatic","language":"","r
+    → respuesta: {"action":{"id":"36707","campaign_id":4596,"deduplicate_id":"22261:1780176553","name":"Push 1 Push - Primer depósito","layout":"","body":"Los CDTs están al 12% EA, el nivel más alto en años. Si inviertes $1.000.000 hoy, aseguras $120.000 de ganancia al año. Empieza desde $200.000. ¡Es súper fácil!","created":1775671358,"updated":1780176553,"type":"push","sending_state":"automatic","language":"","r
+ácil!","created":1775671358,"updated":1780176553,"type":"push","sending_state":"automatic","language":"","r
+
+    subject : ❌ MISMATCH
+    body    : ❌ MISMATCH
+
+    subject en CIO : Llegaste en el momento perfecto 💚
+    body en CIO    : Los CDTs están al 12% EA, el nivel más alto en años. Si inviertes $1.000.000 hoy, aseguras $120.000 de ganancia al año. Empieza desde $200.000. ¡Es sú
+
+  ⚠  No coincide. Verifica manualmente en CIO:
+     https://fly.customer.io/workspaces/112828/journeys/campaigns/4596/overview/workflow/actions?actionId=36707
+    → respuesta: {"action":{"id":"36707","campaign_id":4596,"deduplicate_id":"22261:1780176553","name":"Push 1 Push - Primer depósito","layout":"","body":"Los CDTs están al 12% EA, el nivel más alto en años. Si inviertes $1.000.000 hoy, aseguras $120.000 de ganancia al año. Empieza desde $200.000. ¡Es súper fácil!","created":1775671358,"updated":1780176553,"type":"push","sending_state":"automatic","language":"","r
+    tipo=push  nombre='Push 1 Push - Primer depósito'  template_id=22261
+
+[2] Longitud por rama Liquid:
+    OK — subject ≤60 chars, body ≤180 chars por rama.
+
+[3] Auth + leyendo template 22261 via fly API...
+    POST https://us.fly.customer.io/v1/service_accounts/oauth/token  (sa_live → JWT)
+    → status  : 200
+    → JWT obtenido (primeros 30 chars): eyJhbGciOiJFZERTQSIsInR5cCI6Ik...
+    GET https://us.fly.customer.io/v1/environments/112828/templates/22261
+    → status  : 200
+    → 35 campos leídos: ['action_id', 'bcc', 'body', 'body_amp', 'body_json', 'body_plain', 'created', 'created_by_user', 'editor', 'fake_bcc', 'from_identity_id', 'headers', 'id', 'image_url', 'language', 'layout_id', 'links', 'name', 'newsletter_id', 'preheader_text', 'preprocessor', 'recipient', 'recipient_environment_id', 'reply_to_identity_id', 'request_method', 'subject', 'template_engine', 'template_type', 'test_group_id', 'transactional_message_id', 'updated', 'updated_by_user', 'url', 'variables', 'whatsapp']
+
+[4] Diff — estado actual vs propuesto:
+
+  subject actual    : Llegaste en el momento perfecto 💚
+  subject propuesto : {% if customer.Perfil_de_riesgo == '1. Conservador' %}💰 Tu CDT al 12% EA está listo{% elsif customer.Perfil_de_riesgo == '2. Moderado' or customer.Perfil_de_riesgo == '3. Arriesgado' %}📈 El mercado corrigió: es tu momento{% else %}💚 Llegaste en el momento perfecto{% endif %}
+
+  body actual       : Los CDTs están al 12% EA, el nivel más alto en años. Si inviertes $1.000.000 hoy, aseguras $120.000 de ganancia al año. 
+  body propuesto    : {% if customer.Perfil_de_riesgo == '1. Conservador' %}Los CDT siguen por encima del 11% EA mientras el mercado se mueve.
+
+[5] Actualizando template 22261 via fly API...
+
+    [PUT] Leyendo template 22261 completo desde fly API...
+    GET https://us.fly.customer.io/v1/environments/112828/templates/22261
+    → status  : 200
+    → 35 campos leídos: ['action_id', 'bcc', 'body', 'body_amp', 'body_json', 'body_plain', 'created', 'created_by_user', 'editor', 'fake_bcc', 'from_identity_id', 'headers', 'id', 'image_url', 'language', 'layout_id', 'links', 'name', 'newsletter_id', 'preheader_text', 'preprocessor', 'recipient', 'recipient_environment_id', 'reply_to_identity_id', 'request_method', 'subject', 'template_engine', 'template_type', 'test_group_id', 'transactional_message_id', 'updated', 'updated_by_user', 'url', 'variables', 'whatsapp']
+    → subject actual : Llegaste en el momento perfecto 💚
+    → body actual    : Los CDTs están al 12% EA, el nivel más alto en años. Si inviertes $1.000.000 hoy
+
+    PUT https://us.fly.customer.io/v1/environments/112828/templates/22261
+    → subject nuevo  : {% if customer.Perfil_de_riesgo == '1. Conservador' %}💰 Tu CDT al 12% EA está listo{% elsif customer
+    → body nuevo     : {% if customer.Perfil_de_riesgo == '1. Conservador' %}Los CDT siguen por encima del 11% EA mientras
+    → campos en payload: 35
+    → status  : 200
+    → respuesta: {"layouts":[],"template":{"id":22261,"action_id":36707,"newsletter_id":null,"transactional_message_id":null,"links":{"metric":"/v1/environments/112828/actions/36707/metrics?timestamp=1780179248","tracked_link_metric":"/v1/environments/112828/actions/36707/tracked_link_metric?timestamp=1780179248"},"layout_id":null,"from_identity_id":null,"reply_to_identity_id":null,"name":"Push 1 Push - Primer depósito","bcc":null,"fake_bcc":true,"recipient":null,"subject":"{% if customer.Perfil_de_riesgo == '1. Conservador' %}💰 Tu CDT al 12% EA está listo{% elsif customer.Perfil_de_riesgo == '2. Moderado' or customer.Perfil_de_riesgo == '3. Arriesgado' %}📈 El mercado corrigió: es tu momento{% else %}💚 Llegaste en el momento perfecto{% endif %}","body":"{% if customer.Perfil_de_riesgo == '1. Conservador' %
+
+[6] Verificando — leyendo template 22261 de vuelta...
+    GET https://us.fly.customer.io/v1/environments/112828/templates/22261
+    → status  : 200
+    → 35 campos leídos: ['action_id', 'bcc', 'body', 'body_amp', 'body_json', 'body_plain', 'created', 'created_by_user', 'editor', 'fake_bcc', 'from_identity_id', 'headers', 'id', 'image_url', 'language', 'layout_id', 'links', 'name', 'newsletter_id', 'preheader_text', 'preprocessor', 'recipient', 'recipient_environment_id', 'reply_to_identity_id', 'request_method', 'subject', 'template_engine', 'template_type', 'test_group_id', 'transactional_message_id', 'updated', 'updated_by_user', 'url', 'variables', 'whatsapp']
+
+    subject : ✅ OK
+    body    : ✅ OK
+
+    subject en CIO : {% if customer.Perfil_de_riesgo == '1. Conservador' %}💰 Tu CDT al 12% EA está listo{% elsif customer.Perfil_de_riesgo == '2. Moderado' or customer.Per
+    body en CIO    : {% if customer.Perfil_de_riesgo == '1. Conservador' %}Los CDT siguen por encima del 11% EA mientras el mercado se mueve. Capital seguro y rindiendo de
+
+  ✅ Actualización verificada correctamente.
+     Ver en CIO: https://fly.customer.io/workspaces/112828/journeys/campaigns/4596/overview/workflow/actions?actionId=36707

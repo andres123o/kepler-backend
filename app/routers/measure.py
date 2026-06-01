@@ -3,8 +3,6 @@ from typing import Any
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
-from app.services import bigquery_client
-
 router = APIRouter()
 
 
@@ -25,41 +23,12 @@ class SaveSnapshotPayload(BaseModel):
 
 @router.get("/status")
 def bq_status() -> dict[str, Any]:
-    """Verifica si BigQuery está configurado."""
-    return {
-        "configured": bigquery_client.is_configured(),
-        "message": (
-            "BigQuery configurado correctamente"
-            if bigquery_client.is_configured()
-            else "Falta configurar BQ_CREDENTIALS_PATH o BQ_SERVICE_ACCOUNT_JSON en .env"
-        ),
-    }
+    return {"configured": False, "message": "BigQuery no configurado (FASE 4 pendiente)"}
 
 
 @router.post("/run")
 def run_measurement(body: MeasurementRequest) -> dict[str, Any]:
-    """
-    Mide el impacto de una campaña comparando grupo test vs control.
-    - test_user_ids: lista de IDs de usuarios que recibieron la campaña (del reporte CIO)
-    - start_date / end_date: ventana sobre date_full_user en BigQuery
-    """
-    if not bigquery_client.is_configured():
-        raise HTTPException(
-            status_code=503,
-            detail="BigQuery no configurado. Agrega BQ_CREDENTIALS_PATH o BQ_SERVICE_ACCOUNT_JSON en .env",
-        )
-    try:
-        from app.services.measurement import run_measurement as _run
-        return _run(
-            test_user_ids=body.test_user_ids,
-            start_date=body.start_date,
-            end_date=body.end_date,
-            campaign_name=body.campaign_name,
-        )
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    raise HTTPException(status_code=503, detail="BigQuery no configurado (FASE 4 pendiente)")
 
 
 # ── Snapshots manuales (HTML generado por Claude desde resultados BQ) ─────────
