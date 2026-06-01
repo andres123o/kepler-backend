@@ -693,12 +693,34 @@ def generate_weekly_strategy(
                     a.get("step_code"), a.get("prioridad"),
                     a.get("campaña_existente_id", "nueva"), a.get("tipo_accion"))
 
+    # Deduplicar por campaña_existente_id — nunca dos acciones para la misma campaña
+    _seen_cids: set[str] = set()
+    acciones_dedup: list[dict] = []
+    for _a in acciones:
+        _cid = str(_a.get("campaña_existente_id") or "")
+        _key = _cid if _cid else f"nueva_{len(acciones_dedup)}"
+        if _key not in _seen_cids:
+            _seen_cids.add(_key)
+            acciones_dedup.append(_a)
+        else:
+            logger.warning("[FASE 1] Descartando acción duplicada para campaña_id=%s (bug del modelo)", _cid)
+    if len(acciones_dedup) < len(acciones):
+        logger.info("[FASE 1] Deduplicadas: %d → %d acciones", len(acciones), len(acciones_dedup))
+        strategy["acciones"] = acciones_dedup
+        acciones = acciones_dedup
+
     # ── FASE 2: Auto-fetch del journey completo para campañas seleccionadas ────
-    a_enriquecer = [
-        a for a in acciones
-        if a.get("tipo_accion") in ("optimizar", "reforzar")
-        and a.get("campaña_existente_id")
-    ][:2]  # Máximo 2 — nunca más, prohibido
+    # Deduplicar por cid para no desperdiciar ambos slots en la misma campaña
+    _enriquecer_seen: set[str] = set()
+    a_enriquecer: list[dict] = []
+    for _a in acciones:
+        _cid = str(_a.get("campaña_existente_id") or "")
+        if (_a.get("tipo_accion") in ("optimizar", "reforzar")
+                and _cid and _cid not in _enriquecer_seen):
+            _enriquecer_seen.add(_cid)
+            a_enriquecer.append(_a)
+            if len(a_enriquecer) >= 2:
+                break
 
     logger.info("──────────────────────────────────────────────────")
     if not a_enriquecer:

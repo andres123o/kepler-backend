@@ -304,7 +304,10 @@ REGLAS ESTRICTAS — cada una es obligatoria sin excepción:
 
 ━━ RESPUESTA ━━
 SOLO JSON válido, sin markdown, sin texto antes o después.
-ACCIONES: una por cada paso del funnel que necesite intervención — sin límite. Si hay 8 pasos que necesitan cambio, generás 8 acciones. Si solo hay 2, generás 2. No limitarse artificialmente.
+ACCIONES — REGLAS OBLIGATORIAS (sin excepción):
+1. MÁXIMO 2 acciones de prioridad "alta". El modelo SHAP ya indicó cuáles son los 1 o 2 pasos más críticos — esos y solo esos van como "alta". Si hay un solo paso crítico, generás 1 acción. Si hay dos, generás 2. NUNCA más de 2 acciones alta.
+2. NUNCA dos acciones para la misma campaña. Una campaña = exactamente una acción. Si tenés dos razones para tocar la misma campaña, combinalasen una sola acción.
+3. Los pasos del funnel con señales débiles (|z-score| < 1.5) o campañas que ya funcionan bien (CR ≥ 5%) → mencionalos en el campo "resumen" pero NO generés acción para ellos.
 Incluí señales positivas fuertes si hay oportunidad de capitalizar — no solo corregir problemas.
 Si no hay nada que cambiar esta semana, devolvé "acciones":[] con un resumen que lo explique.
 Razon: exactamente 2 oraciones. Oración 1: señal del modelo + impacto en depósitos. Oración 2: qué está fallando en el copy o timing actual. Los diffs concretos van SOLO en propuesta.nodos, NUNCA en razon.
