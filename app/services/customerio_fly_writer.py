@@ -195,6 +195,8 @@ def update_node_copy(
     subject: str,
     body: str,
     preheader: str | None = None,
+    user_name: str | None = None,
+    campaign_name: str | None = None,
 ) -> dict[str, Any]:
     """
     Actualiza el copy de un nodo (push o email) en CIO.
@@ -249,7 +251,12 @@ def update_node_copy(
     # Registrar timestamp del update exitoso para el cooldown
     _last_update[action_id] = time.monotonic()
 
-    logger.info("CIO fly writer: nodo %s actualizado correctamente", action_id)
+    # Log de auditoría: quién actualizó este nodo
+    if user_name:
+        from app.services.supabase_client import log_node_update
+        log_node_update(user_name, campaign_name, action_id)
+
+    logger.info("CIO fly writer: nodo %s actualizado correctamente (user=%s)", action_id, user_name or "anon")
     return {
         "ok": True,
         "action_id": action_id,

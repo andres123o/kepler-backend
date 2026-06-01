@@ -12,6 +12,7 @@ from app.services.strategy_agent import (
     get_funnel_health,
 )
 from app.services.supabase_client import (
+    get_admin_status,
     get_all_assignments,
     get_campaigns_cache,
     get_funnel_context,
@@ -36,6 +37,8 @@ class UpdateNodePayload(BaseModel):
     subject: str
     cuerpo: str
     preheader: str | None = None
+    user_name: str | None = None
+    campaign_name: str | None = None
 
 
 class GeneratePayload(BaseModel):
@@ -223,6 +226,8 @@ def update_node(payload: UpdateNodePayload) -> dict[str, Any]:
             subject=payload.subject,
             body=payload.cuerpo,
             preheader=payload.preheader,
+            user_name=payload.user_name,
+            campaign_name=payload.campaign_name,
         )
     except RuntimeError as exc:
         # Cooldown activo → 429. Cualquier otro RuntimeError (config, JWT) → 503.
@@ -243,6 +248,15 @@ def get_assignment(user_name: str) -> dict[str, Any]:
 def get_assignments() -> list[dict[str, Any]]:
     """Devuelve todas las asignaciones. Solo para admin."""
     return get_all_assignments()
+
+
+@router.get("/admin-status")
+def admin_status() -> list[dict[str, Any]]:
+    """Panel admin: estado de cada agente — nodos actualizados y última actividad."""
+    try:
+        return get_admin_status()
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
 @router.post("/execute")

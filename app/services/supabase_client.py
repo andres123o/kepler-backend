@@ -360,6 +360,58 @@ def get_all_assignments() -> list[dict[str, Any]]:
     return res.data or []
 
 
+def log_node_update(user_name: str, campaign_name: str | None, action_id: int) -> None:
+    """Registra que un usuario actualizó un nodo en CIO."""
+    try:
+        client = _get_client()
+        client.table("node_update_log").insert({
+            "user_name":     user_name,
+            "campaign_name": campaign_name,
+            "action_id":     action_id,
+        }).execute()
+    except Exception as exc:
+        logger.warning("log_node_update: no se pudo registrar (user=%s, action=%s): %s", user_name, action_id, exc)
+
+
+def get_admin_status() -> list[dict[str, Any]]:
+    """Panel admin: estado de cada agente — cuántos nodos actualizó y cuándo."""
+    from collections import defaultdict
+    client = _get_client()
+
+    assignments = (
+        client.table("user_campaign_assignments")
+        .select("user_name, campaign_name")
+        .execute()
+    ).data or []
+
+    updates = (
+        client.table("node_update_log")
+        .select("user_name, action_id, updated_at")
+        .order("updated_at", desc=True)
+        .execute()
+    ).data or []
+
+    user_updates: dict[str, list[dict]] = defaultdict(list)
+    for u in updates:
+        user_updates[u["user_name"]].append(u)
+
+    result = []
+    for a in assignments:
+        uname    = a["user_name"]
+        uupdates = user_updates.get(uname, [])
+        # Deduplicar por action_id para contar nodos únicos
+        seen_nodes = {u["action_id"] for u in uupdates}
+        result.append({
+            "user_name":     uname,
+            "campaign_name": a["campaign_name"],
+            "nodes_updated": len(seen_nodes),
+            "last_update":   uupdates[0]["updated_at"] if uupdates else None,
+            "status":        "done" if seen_nodes else "pending",
+        })
+
+    return result
+
+
 def get_latest_structural() -> dict[str, Any] | None:
     """Devuelve el resultado estructural más reciente (Fase 2B), o None si no hay.
     Filtra en Python para consistencia con get_strategy_history."""
