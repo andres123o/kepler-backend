@@ -39,6 +39,7 @@ class UpdateNodePayload(BaseModel):
     preheader: str | None = None
     user_name: str | None = None
     campaign_name: str | None = None
+    semana_label: str | None = None
 
 
 class GeneratePayload(BaseModel):
@@ -228,6 +229,7 @@ def update_node(payload: UpdateNodePayload) -> dict[str, Any]:
             preheader=payload.preheader,
             user_name=payload.user_name,
             campaign_name=payload.campaign_name,
+            semana_label=payload.semana_label,
         )
     except RuntimeError as exc:
         # Cooldown activo → 429. Cualquier otro RuntimeError (config, JWT) → 503.
@@ -235,6 +237,13 @@ def update_node(payload: UpdateNodePayload) -> dict[str, Any]:
         raise HTTPException(status_code=status, detail=str(exc)) from exc
     except Exception as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
+@router.get("/sent-nodes")
+def sent_nodes(semana_label: str) -> dict[str, Any]:
+    """Devuelve los action_ids ya enviados a CIO para la semana indicada."""
+    from app.services.supabase_client import get_sent_nodes
+    return {"semana_label": semana_label, "sent": get_sent_nodes(semana_label)}
 
 
 @router.get("/assignment")

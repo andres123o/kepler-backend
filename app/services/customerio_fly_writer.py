@@ -52,8 +52,18 @@ def _fly_put(path: str, payload: dict[str, Any]) -> dict[str, Any]:
 
     if not resp.is_success:
         logger.error("CIO fly writer: PUT falló %s — body: %s", resp.status_code, resp.text[:500])
+        # Extraer mensaje legible del error de CIO antes de lanzar
+        try:
+            cio_errors = resp.json().get("errors", [])
+            if cio_errors:
+                detail = cio_errors[0].get("detail", resp.text[:200])
+                raise RuntimeError(f"CIO rechazó el email: {detail}")
+        except RuntimeError:
+            raise
+        except Exception:
+            pass
+        resp.raise_for_status()
 
-    resp.raise_for_status()
     return resp.json()
 
 
@@ -97,6 +107,62 @@ def _unmask_liquid(text: str, tokens: list[str], prefix: str = "LQ") -> str:
     return text
 
 
+def _check_liquid_blocks(html: str) -> str | None:
+    """
+    Verifica que los bloques Liquid estén correctamente cerrados.
+    Retorna mensaje de error si la estructura es inválida, None si está OK.
+    """
+    opens  = len(re.findall(r'\{%-?\s*(?:if|unless|for|case)\b', html))
+    closes = len(re.findall(r'\{%-?\s*end(?:if|unless|for|case)\b', html))
+    if opens != closes:
+        return f"Liquid inválido: {opens} apertura(s) vs {closes} cierre(s) de bloque"
+    return None
+
+
+def _repair_orphaned_liquid(html: str) -> tuple[str, int]:
+    """
+    Elimina closers/openers Liquid huérfanos usando una pila.
+    Retorna (html_reparado, cantidad_eliminada).
+
+    Esto cubre el caso donde Agent 2 borra un __LQ_N__ de apertura
+    pero conserva su __LQ_M__ de cierre correspondiente.
+    """
+    TAG_RE = re.compile(
+        r'(\{%-?\s*(?:if|unless|for|case|elsif|else|end(?:if|unless|for|case))\b[^%]*?-?%\})',
+        re.IGNORECASE | re.DOTALL,
+    )
+    parts   = TAG_RE.split(html)
+    result: list[str] = []
+    depth   = 0
+    removed = 0
+
+    for part in parts:
+        if not TAG_RE.fullmatch(part):
+            result.append(part)
+            continue
+        inner = re.sub(r'^\{%-?\s*', '', part)
+        inner = re.sub(r'\s*-?%\}$', '', inner).strip()
+
+        if re.match(r'(?:if|unless|for|case)\b', inner, re.IGNORECASE):
+            depth += 1
+            result.append(part)
+        elif re.match(r'end(?:if|unless|for|case)\b', inner, re.IGNORECASE):
+            if depth > 0:
+                depth -= 1
+                result.append(part)
+            else:
+                removed += 1   # closer sin apertura → descartar
+        elif re.match(r'(?:elsif|else)\b', inner, re.IGNORECASE):
+            if depth > 0:
+                result.append(part)
+            else:
+                removed += 1   # elsif/else sin if enclosing → descartar
+        else:
+            result.append(part)
+
+    return ''.join(result), removed
+
+
 def _patch_email_html_with_claude(full_html: str, new_text: str, action_id: int) -> str:
     """
     Agente 2 — HTML Patcher.
@@ -129,6 +195,7 @@ def _patch_email_html_with_claude(full_html: str, new_text: str, action_id: int)
         len(html_tokens), len(text_tokens), action_id,
     )
 
+    lq_count = len(html_tokens)
     prompt = (
         "Sos un editor quirúrgico de HTML para emails. "
         "Tu única tarea es reemplazar el texto visible del cuerpo del email con el nuevo texto que te doy.\n\n"
@@ -141,10 +208,14 @@ def _patch_email_html_with_claude(full_html: str, new_text: str, action_id: int)
         "6. NO cambies imágenes ni sus atributos alt\n"
         "7. NO agregues ni elimines tags HTML\n"
         "8. Mantené EXACTAMENTE los comentarios <!--[if mso]>, <![endif]--> y tags VML\n"
-        "9. CRÍTICO: los placeholders __LQ_N__ y __NLQ_N__ son código Liquid enmascarado. "
-        "Devolvelos EXACTAMENTE como aparecen, sin modificar ni un carácter. "
-        "Si el nuevo texto tiene un __NLQ_N__, colocalo en el HTML donde corresponda al texto nuevo.\n"
-        "10. Si el nuevo texto tiene menos contenido que el original, dejá el resto como está\n\n"
+        f"9. CRÍTICO — PLACEHOLDERS __LQ_N__ (hay {lq_count} en total, de __LQ_0__ a __LQ_{lq_count-1}__): "
+        "son código Liquid del email original. TODOS deben aparecer en tu output sin excepción. "
+        "Si el cuerpo original tenía __LQ_N__ dentro del texto, conservalos en la zona donde pusiste el texto nuevo — "
+        "NO los elimines aunque estén rodeados de texto viejo. "
+        f"Verificá antes de responder: tu output debe tener exactamente {lq_count} tokens __LQ_N__.\n"
+        "10. CRÍTICO — PLACEHOLDERS __NLQ_N__: son el Liquid del nuevo texto. "
+        "Colocalos en el HTML exactamente donde aparecen en el NUEVO TEXTO, respetando su posición relativa.\n"
+        "11. Si el nuevo texto tiene menos contenido que el original, dejá el resto del HTML como está\n\n"
         f"HTML ACTUAL DEL EMAIL:\n{masked_html}\n\n"
         f"NUEVO TEXTO DEL CUERPO:\n{masked_text}\n\n"
         "Devolvé ÚNICAMENTE el HTML completo modificado. Sin explicaciones, sin markdown, sin ```."
@@ -182,8 +253,29 @@ def _patch_email_html_with_claude(full_html: str, new_text: str, action_id: int)
             restored_text, len(text_tokens),
         )
 
+        # Validar estructura Liquid antes de enviar a CIO
+        liquid_err = _check_liquid_blocks(result)
+        if liquid_err:
+            logger.warning("CIO fly writer: %s (action %s) — intentando auto-reparar", liquid_err, action_id)
+            repaired, n_removed = _repair_orphaned_liquid(result)
+            repair_err = _check_liquid_blocks(repaired)
+            if repair_err is None and n_removed > 0:
+                logger.info(
+                    "CIO fly writer: auto-repair OK — %d token(s) huérfano(s) eliminado(s) (action %s)",
+                    n_removed, action_id,
+                )
+                return repaired
+            # No se pudo reparar → error claro, no culpar al texto del usuario
+            raise RuntimeError(
+                "Error interno al insertar el texto en el email — la estructura Liquid resultó inválida "
+                "después del procesamiento. Reintentá. Si el error persiste, simplificá los bloques "
+                "{% if %}/{% endif %} del texto."
+            )
+
         return result
 
+    except RuntimeError:
+        raise  # propagar errores de validación al caller
     except Exception as exc:
         logger.error("CIO fly writer: Agent 2 falló (action %s) — %s — usando original", action_id, exc)
         return full_html
@@ -197,6 +289,7 @@ def update_node_copy(
     preheader: str | None = None,
     user_name: str | None = None,
     campaign_name: str | None = None,
+    semana_label: str | None = None,
 ) -> dict[str, Any]:
     """
     Actualiza el copy de un nodo (push o email) en CIO.
@@ -254,7 +347,7 @@ def update_node_copy(
     # Log de auditoría: quién actualizó este nodo
     if user_name:
         from app.services.supabase_client import log_node_update
-        log_node_update(user_name, campaign_name, action_id)
+        log_node_update(user_name, campaign_name, action_id, semana_label)
 
     logger.info("CIO fly writer: nodo %s actualizado correctamente (user=%s)", action_id, user_name or "anon")
     return {

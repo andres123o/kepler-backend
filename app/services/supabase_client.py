@@ -360,7 +360,12 @@ def get_all_assignments() -> list[dict[str, Any]]:
     return res.data or []
 
 
-def log_node_update(user_name: str, campaign_name: str | None, action_id: int) -> None:
+def log_node_update(
+    user_name: str,
+    campaign_name: str | None,
+    action_id: int,
+    semana_label: str | None = None,
+) -> None:
     """Registra que un usuario actualizó un nodo en CIO."""
     try:
         client = _get_client()
@@ -368,13 +373,31 @@ def log_node_update(user_name: str, campaign_name: str | None, action_id: int) -
             "user_name":     user_name,
             "campaign_name": campaign_name,
             "action_id":     action_id,
+            "semana_label":  semana_label,
         }).execute()
     except Exception as exc:
         logger.warning("log_node_update: no se pudo registrar (user=%s, action=%s): %s", user_name, action_id, exc)
 
 
+def get_sent_nodes(semana_label: str) -> list[int]:
+    """Devuelve los action_ids ya enviados para la semana indicada."""
+    try:
+        client = _get_client()
+        res = (
+            client.table("node_update_log")
+            .select("action_id")
+            .eq("semana_label", semana_label)
+            .execute()
+        )
+        return [r["action_id"] for r in (res.data or [])]
+    except Exception as exc:
+        logger.warning("get_sent_nodes: error consultando log (semana=%s): %s", semana_label, exc)
+        return []
+
+
 def get_admin_status() -> list[dict[str, Any]]:
-    """Panel admin: estado de cada agente — cuántos nodos actualizó y cuándo."""
+    """Panel admin: estado de cada agente — nodos enviados, total y pendientes para la semana activa."""
+    import json
     from collections import defaultdict
     client = _get_client()
 
@@ -384,29 +407,102 @@ def get_admin_status() -> list[dict[str, Any]]:
         .execute()
     ).data or []
 
-    updates = (
+    # Estrategia activa: semana_label + total de nodos modificables (Modo 1 + Modo 2 combinados)
+    # Ambos modos se guardan en la misma tabla; se deduplicан por id_nodo_cio para no doblar contar.
+    semana_label: str | None = None
+    # campaign_name_lower → set de id_nodo_cio únicos modificables
+    campaign_node_ids: dict[str, set] = {}
+
+    # Tomar el semana_label de la fila más reciente, luego cargar TODAS las de esa semana
+    latest = (
+        client.table("strategy_results")
+        .select("semana_label")
+        .order("created_at", desc=True)
+        .limit(1)
+        .execute()
+    ).data
+    if latest:
+        semana_label = latest[0].get("semana_label")
+
+    if semana_label:
+        all_rows = (
+            client.table("strategy_results")
+            .select("full_result")
+            .eq("semana_label", semana_label)
+            .execute()
+        ).data or []
+
+        for row in all_rows:
+            raw = row.get("full_result") or {}
+            full_result = raw if isinstance(raw, dict) else json.loads(raw)
+            for accion in full_result.get("acciones", []):
+                camp_name = (
+                    accion.get("campana_existente_nombre")
+                    or accion.get("campaña_existente_nombre")
+                    or accion.get("step_name")
+                    or ""
+                ).lower()
+                if not camp_name:
+                    continue
+                for nodo in (accion.get("nodos_completos") or []):
+                    if not nodo.get("modificado"):
+                        continue
+                    nid = nodo.get("id_nodo_cio")
+                    if nid is not None:
+                        campaign_node_ids.setdefault(camp_name, set()).add(nid)
+                    else:
+                        # Sin id — usar nombre como clave de dedup
+                        campaign_node_ids.setdefault(camp_name, set()).add(f"nombre:{nodo.get('nombre','?')}")
+
+    campaign_totals: dict[str, int] = {k: len(v) for k, v in campaign_node_ids.items()}
+
+    def _total_for(campaign_name: str) -> int | None:
+        c = campaign_name.lower()
+        if c in campaign_totals:
+            return campaign_totals[c]
+        for k, v in campaign_totals.items():
+            if c in k or k in c:
+                return v
+        return None
+
+    # Updates filtrados por la semana activa
+    updates_q = (
         client.table("node_update_log")
         .select("user_name, action_id, updated_at")
         .order("updated_at", desc=True)
-        .execute()
-    ).data or []
+    )
+    if semana_label:
+        updates_q = updates_q.eq("semana_label", semana_label)
+    updates = updates_q.execute().data or []
 
     user_updates: dict[str, list[dict]] = defaultdict(list)
     for u in updates:
-        user_updates[u["user_name"]].append(u)
+        user_updates[u["user_name"].lower()].append(u)
 
     result = []
     for a in assignments:
-        uname    = a["user_name"]
-        uupdates = user_updates.get(uname, [])
-        # Deduplicar por action_id para contar nodos únicos
-        seen_nodes = {u["action_id"] for u in uupdates}
+        uname       = a["user_name"]
+        uupdates    = user_updates.get(uname.lower(), [])
+        nodes_sent  = len({u["action_id"] for u in uupdates})
+        nodes_total = _total_for(a["campaign_name"])
+        nodes_pending = max(0, nodes_total - nodes_sent) if nodes_total is not None else None
+
+        if nodes_total is not None and nodes_sent >= nodes_total:
+            status = "done"
+        elif nodes_sent > 0:
+            status = "partial"
+        else:
+            status = "pending"
+
         result.append({
             "user_name":     uname,
             "campaign_name": a["campaign_name"],
-            "nodes_updated": len(seen_nodes),
+            "nodes_updated": nodes_sent,
+            "nodes_total":   nodes_total,
+            "nodes_pending": nodes_pending,
+            "semana_label":  semana_label,
             "last_update":   uupdates[0]["updated_at"] if uupdates else None,
-            "status":        "done" if seen_nodes else "pending",
+            "status":        status,
         })
 
     return result
