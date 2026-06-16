@@ -1,0 +1,610 @@
+3 jun 2026
+Tool funnel pe - Transcripción
+00:00:00
+ 
+Andrea Melo: Hola. Hola.
+Andres Felipe Cristancho: Andre, ¿cómo vas?
+Andrea Melo: ¿Qué tal? Bien. ¿Cómo estás tú? ¿Qué tal? El
+Andres Felipe Cristancho: Bien,
+Andrea Melo: día
+Andres Felipe Cristancho: bien relajadito. Tengo mucho
+Andrea Melo: más o menos ahí vamos actualizando cosas un poquito un poquito
+Andres Felipe Cristancho: trabajo.
+Andrea Melo: cargado, pero ahí va. Bueno, eh, nada, a ver, este rapidito como más o menos para ir viendo. Yo me he metido como a ver e puse la herramienta
+Andres Felipe Cristancho: Bien.
+Andrea Melo: e y más yo no sé si o sea lo que yo veo desde mi usuario es solamente lo que yo puedo ver desde mi usuario, no es que puedo ver lo de otros usuarios o si se puede a
+Andres Felipe Cristancho: No, no puedes. Espérate, te muestro cómo se ve
+Andrea Melo: ver o sea me sirve que me hagas como que fácil un recorrido express
+Andres Felipe Cristancho: todo.
+Andrea Melo: como para ver si he entendido todas las posibilidades.
+Andres Felipe Cristancho: Listo. Ahí ves. Bueno, te voy a explicar igual como se lo explicaba todo.
+Andrea Melo: ya de F.
+Andres Felipe Cristancho: Este tool lo que hace es que está empulsado sobre una capa de inteligencia. Es como si usáramos, bueno, customerío para entregar los mensajes, pero le metemos una capa inteligencia, o sea, un módulo propio con datos propios de Tri.
+ 
+ 
+00:02:39
+ 
+Andres Felipe Cristancho: Entonces, lo que hacemos aquí es que tengo un modelo machine learning que está entrenado con
+Andrea Melo: Ya.
+Andres Felipe Cristancho: datos del funnel de registro a primeros depósitos. O sea, todas las variables que hay aquí con las que se entrenó el modelo son variables que hizo el usuario antes de hacer su primer depósito desde el 2021. Hay datos. Entonces,
+Andrea Melo: ya.
+Andres Felipe Cristancho: un modelo 100% de Tri, sabe el historial de Tri y sabe qué va a pasar. Entonces eso cada semana proyecta los primeros depósitos de la siguiente
+Andrea Melo: Okay.
+Andres Felipe Cristancho: semana. Es decir, el domingo esto se procesa solito y el lunes genera una proyección para saber esa semana cuántos primeros depósitos va a haber. Pero lo más importante es que nos dice cuáles de esas variables
+Andrea Melo: Ya estoy,
+Andres Felipe Cristancho: explican la tendencia de la proyección que él dio. Y además de eso,
+Andrea Melo: ya Estoy
+Andres Felipe Cristancho: el modelo también sabe que hay un ciclo del usuario en tri.
+Andrea Melo: cerrar Bueno,
+Andres Felipe Cristancho: Ese ciclo del usuario en tri es que digamos esta semana hay 100 personas aprobadas. Entonces, el 35% deposita esta misma semana,
+Andrea Melo: Ok.
+Andres Felipe Cristancho: el 25% la siguiente semana y así va disminuyendo el porcentaje hasta llegar a la semana 8o.
+ 
+ 
+00:04:00
+ 
+Andres Felipe Cristancho: Entonces, eso es importante porque este modelo nos ayuda a mantener la tendencia alta y entienden que tenemos que tener la tendencia alta. Entonces, por eso es super importante hacer un semanal por lo mismo
+Andrea Melo: Ok.
+Andres Felipe Cristancho: el e bueno, entonces aquí ya nos dice cuáles variables son las que tenemos que atacar esta semana para subir la tendencia de los primeros depósitos, para que esa proyección suba, aumente o no decrezca, cualquiera de las dos o las dos a la vez. Entonces, para esta semana nos dijo que una variable crítica era el
+Andrea Melo: Okay.
+Andres Felipe Cristancho: colcap que está 198% por encima del promedio de las últimas 12 semanas. Entonces teníamos que atacar esa variable, o sea, optimizar las comunicaciones en base a esa variable. Después de eso le pasamos todo ese toda esa información,
+Andrea Melo: Okay.
+Andres Felipe Cristancho: todo el análisis que hizo el modelo a un agente. Y este agente lo que hace es que vaya el diagnóstico del funnel de las campañas también, cómo van. Después toma los datos del modelo, después hace una investigación de mercado, de contexto de mercado de esta semana, los datos relantes para la siguiente, noticias y también tiene contexto de producto de tri y de compliance. A partir de eso y del modelo que nos dijo que hay que priorizar varias cocap
+ 
+ 
+00:05:30
+ 
+Andrea Melo: Okay.
+Andres Felipe Cristancho: y la tendencia de los rechazos de KYC. nos dice que tenemos que priorizar la
+Andrea Melo: SF que
+Andres Felipe Cristancho: campaña de primeros depósitos y la de fotos
+Andrea Melo: esar.
+Andres Felipe Cristancho: kiw. Entonces ahí nos dice como lo que está pasando, nos da un resumen ahí chiquito lo que está pasando para ambas. Y lo que yo hago es que vengo aquí en el panel en el can y miro la sugerencia que él me da
+Andrea Melo: Ajá.
+Andres Felipe Cristancho: de del mensaje. Entonces, aquí esto también lo bueno es que él también entiende que hay que que en ciertos casos hay que segmentar por perfil. Entonces, en los casos que él decida que es lo más óptimo y eficiente lo hace. Y aquí ya lo está segmentando por tipo de perfil.
+Andrea Melo: No está grabando.
+Andres Felipe Cristancho: Y ya aquí la idea es que la persona vaya que todo esté bien, que no haya como cifras raras o datos raros, que todo esté super bien, que ha funcionado, no hay nada raro, o sea, ha funcionado super bien. La mayoría no ha tenido que cambiarle nada. El email lo mismo, segmentado cuando lo requiere.
+Andrea Melo: Mhm.
+Andres Felipe Cristancho: push otro email,
+ 
+ 
+00:06:53
+ 
+Andrea Melo: ¿A
+Andres Felipe Cristancho: se le dan actualizar en CO y se envía ahí automáticamente y ya listo,
+Andrea Melo: qué te refieres con C? Ah, ya, ya me perdí.
+Andres Felipe Cristancho: merido.
+Andrea Melo: Ya, okay, okay, entiendo. ¿Y cuál y la parte de métricas y resultados?
+Andres Felipe Cristancho: Y en métricas y resultados podemos ver los resultados finalizando la semana,
+Andrea Melo: como
+Andres Felipe Cristancho: es decir, los datos del lunes a domingo.
+Andrea Melo: Ya
+Andres Felipe Cristancho: Un momento porque se quedó cargando ahí. Listo. Entonces, la semana del 25 al 31 logramos recuperar 403 primeros depósitos. que se recuperar puede ser literalmente recuperarlos de gente que o bien nunca hubiera depositado o depositaron más rápido. Entonces, aquí es importante tener en cuenta lo del ciclo del usuario. Entonces, lo más probable es que esta gente sea esa gente que está más lejos de la semana en que se aprobó de la comunicación. Y como esa comunicación, o sea,
+Andrea Melo: Mhm.
+Andres Felipe Cristancho: esas campañas eh tienen un timing, digamos, el push uno se envió un día después, el email dos días después, entonces eso está acorde a al ciclo del usuario. Entonces, estos serían esas personas que estaban más
+ 
+ 
+00:08:26
+ 
+Andrea Melo: Ya.
+Andres Felipe Cristancho: lejos en ese ciclo del usuario y que les lleva una comunicación. Entonces, por eso es que es recuperados y bajamos esta semana el promedio de depósitos de 5.7 días a solo 2 días el promedio y el margen de error de la proyección es de 7.8%.
+Andrea Melo: Okay.
+Andres Felipe Cristancho: O sea, está super bueno el modelo y
+Andrea Melo: Sí, sí, sí, sí. Tal cual.
+Andres Felipe Cristancho: pues aquí ya explica cómo sacamos las métricas, pero pues eso es algo que me toca corregir también porque no supe cómo comunicarlas correctamente y Diego no me las entendió. Me
+Andrea Melo: Sí, o sea, es que claro,
+Andres Felipe Cristancho: tra
+Andrea Melo: ahí está el punto, o sea, está super claro, claro. Nosotros es más como que todo el equipo lo vamos a entender super bien, pero el momento de comunicarlas sí demasiado data, ¿no? Obvio, obvio. Sí. Ya, por eso es cuestión de ya al momento de presentación,
+Andres Felipe Cristancho: Sí.
+Andrea Melo: pero o sea, la herramienta a más detalle, fíjate que mejor, o sea, para nosotros a equipo, ¿no? Obvio. Em, lo lo he entendido, lo he entendido. Eh, más o menos en el la parte que hice modelo entiendo que está toda la info de los funels que está siguiendo.
+ 
+ 
+00:09:53
+ 
+Andrea Melo: Están todos los funels. Yo tengo que cargar los funels o como así está ahí
+Andres Felipe Cristancho: No, no, lo único que tú tienes que hacer es venir a estrategia y ver que todo esté correcto y
+Andrea Melo: configur.
+Andres Felipe Cristancho: ver que el copy que se te asignó, o sea, la campaña que se Si no tenga los copies bien,
+Andrea Melo: Pero,
+Andres Felipe Cristancho: que tenga todo
+Andrea Melo: o sea, lo que voy por ejemplo esa de ahí dice primer depósito Colombia.
+Andres Felipe Cristancho: bien.
+Andrea Melo: Entiendo que te está jalando el el, ay,
+Andres Felipe Cristancho: Ese es el paso,
+Andrea Melo: ¿cómo le digo?
+Andres Felipe Cristancho: espérate. Ese es el paso paso 10, que es cuando ya tienen la cuenta aprobada, pero no he hecho su primer
+Andrea Melo: Claro, claro, claro.
+Andres Felipe Cristancho: depósito.
+Andrea Melo: Pero, o sea, mi duda es acá existen flujos ya creados en customer. ¿Esto lo que hace es actualizar esos flujos o crear nuevos o
+Andres Felipe Cristancho: No,
+Andrea Melo: ambos?
+Andres Felipe Cristancho: optimizarlos. Entonces, digamos, si esto detecta que, digamos, el ciclo del usuario disminuyó o aumentó,
+Andrea Melo: Oh,
+Andres Felipe Cristancho: entonces también nos va a decir en vez de tener, mira, porque aquí también dice lo de los días, día uno, día dos, entonces nos va a decir, mejor pasemoslo de tantos días a tantos días, digamos, lo de la tasa de rechazo de KYC disminuyó,
+ 
+ 
+00:11:08
+ 
+Andres Felipe Cristancho: digo, aumentó. Entonces tenemos que priorizar, no sé, tantos push, digamos, dos push al día y un email un día después. Entonces ahí va y modifica esa estructura en Cristo merido para que no tengamos que nosotros hacerla
+Andrea Melo: Ya.
+Andres Felipe Cristancho: manual. Y lo que hace también es actualizar y optimizar los copies para que nosotros no tengamos que ir uno por uno y salir, entrar, sino que aquí no más todo está bien, va, lo actualiza y ya todo queda actualizado allá en Kemería.
+Andrea Melo: Ok.
+Andres Felipe Cristancho: O sea, es lo mismo que estamos parecido a lo que estábamos haciendo con las campañas que Juanito nos puso en un Excel.
+Andrea Melo: Claro, claro. Quiero mapear cada campaña, solo
+Andres Felipe Cristancho: Exacto. Pero pues ahora no nos demoramos una semana completa,
+Andrea Melo: que
+Andres Felipe Cristancho: sino que nos demoramos 5
+Andrea Melo: Claro,
+Andres Felipe Cristancho: minutos.
+Andrea Melo: claro. duda gigante, o sea, pero lo que no me terminé queda un poquito claro es todas las campañas, por ejemplo, que estab en en ese Excel, o sea, todo lo que está en Customer está conectado esta herramienta, o sea, todos todos los flujos
+Andres Felipe Cristancho: No, no,
+Andrea Melo: creados
+Andres Felipe Cristancho: solo está el flujo de registro a primer depósito porque aquí la esta herramienta está pensada para trabajar por flujos.
+ 
+ 
+00:12:22
+ 
+Andrea Melo: de Colombia. Está
+Andres Felipe Cristancho: Entonces, por lo del modelo, por lo mismo del modelo, porque aquí estamos tratando de atacar los primeros depósitos.
+Andrea Melo: bien.
+Andres Felipe Cristancho: Entonces, el modelo lo que hace es que prioriza y optimiza de acuerdo a esas variables que explican qué hace el usuario antes de hacer su primer depósito.
+Andrea Melo: Ya te entiendo. En el caso de Perú es que, a ver, hay campañas de, o sea, por ejemplo,
+Andres Felipe Cristancho: No.
+Andrea Melo: lo que hay un flujo completo debing en Perú para ver todo lo que es primer depósito, pero yo me acuerdo que antes habían como varios flujos, ¿no? Como que no solo un flujo grande, sino eran varios divididos hasta primer depósito. Entonces, acá la pregunta es, ¿meto de frente este flujo grande? ¿Qué pasa si yo lo quiero dividir? Sería mejor dividirlo. ¿Qué opinas?
+Andres Felipe Cristancho: para producto qua ser el mismo flujo entonces porque esto este modelo tiene los datos pero de
+Andrea Melo: Pero solo un
+Andres Felipe Cristancho: Colombia,
+Andrea Melo: flujo.
+Andres Felipe Cristancho: o sea, literalmente de Bitquery también trae los de Colombia. Entonces tendríamos que entrenar el modelo también para Colombia, para Perú,
+Andrea Melo: No me
+Andres Felipe Cristancho: porque este modelo también tiene datos macroeconómicos.
+Andrea Melo: eso.
+ 
+ 
+00:13:43
+ 
+Andres Felipe Cristancho: O sea, si esto que la TM bajó, que CoP subió o si es,
+Andrea Melo: Claro,
+Andres Felipe Cristancho: digamos, fin de mes o si es festivo,
+Andrea Melo: claro,
+Andres Felipe Cristancho: aprende todos esos patrones.
+Andrea Melo: pero ahorita está solo configurado para Colombia. Tendríamos que entrenarlo para Perú y subir esos flujos de Perú. E pero se puede hacer rápido o lo o te va a demorar
+Andres Felipe Cristancho: Lo más demorado es crear los flujos uno por uno.
+Andrea Melo: como
+Andres Felipe Cristancho: Claro que podríamos duplicar esos. Ah, pues sí, duplicamos las campañas,
+Andrea Melo: de repente se puede cortar
+Andres Felipe Cristancho: cambiamos el filtro a Perú y ya.
+Andrea Melo: algo
+Andres Felipe Cristancho: Porque entrenar el modelo no es lo complicado porque pues yo ya tengo la estructura, mi tarea es sacar los datos,
+Andrea Melo: ya.
+Andres Felipe Cristancho: pero pues yo tengo todas las estructuras, los queries y todo, entonces eso sale medio automático.
+Andrea Melo: Ya, o sea, toda la parte de conexión con la macro estructura con este la conexión con los queries check a Perú habría que, o sea, mi dudes los flujos de Colombia que está siguiendo esto, ¿sabes cuántos flujos son los que tienen en Colombia hasta primera activación? Cinco, seis por ahí.
+Andres Felipe Cristancho: ¿Cómo así?
+ 
+ 
+00:14:54
+ 
+Andres Felipe Cristancho: No te entendí la pregunta.
+Andrea Melo: O sea, la cantidad de flujos que tracka esto, porque es que entiendo que en Colombia lo que te decía, los flujos de desde una persona que se registra hasta una persona que hace su primera activación son
+Andres Felipe Cristancho: Ok.
+Andrea Melo: varios, varios flujos en customer, ¿no? Con diferentes triggers. En el caso de Perú, lo que te decía es, yo creé un flujo completo desde registro hasta primer depósito. El problema es que justamente he ido iterando ese flujo y yo me pregunto, ese fue un experimento, ¿no? Todo completo, va bien, mejoró, pero digo, a ver, si es que lo termino dividiendo y separando ese flujo en varios flujos chiquitos con más detalle, maybe podría ser mejor. Entonces ahí va mi pregunta. No entiendo que en Colombia los flujos, o sea, los flujos están en Colombia no son iguales a los de Perú y entiendo que acá esto está Colombia.
+Andres Felipe Cristancho: Ah.
+Andrea Melo: Entonces, si queremos configurarlo para Perú, tengo la duda de o metemos el flujo grande completo o te funciona más si dividimos o podemos hacer ese experimento.
+Andres Felipe Cristancho: Creo que hay que ir porque es que, o sea, yo lo manejaba así porque, o sea, para mí digamos el funel es de registro a depósito, entonces es como una acción y ahí internamente hay pasos que son los flujos que tú dices.
+ 
+ 
+00:16:15
+ 
+Andrea Melo: Claro.
+Andres Felipe Cristancho: Entonces yo la pensé de digamos de datos básicos a perfil de riesgo. Eso sería una campaña. ¿Qué es lo que tú dices? Que es un flujo entonces es esta. Lamos datos básicos. Ataca el primer paso. Cuando ya completa su perfil de riesgo, tiene que después ir a completar el datos completos,
+Andrea Melo: Ya.
+Andres Felipe Cristancho: que es este. Entonces aquí es pasos que cubres, actualización de perfil y datos completos. Después de que ya completa eso, tiene que ir a verificar la foto y enviar todo eso que sería este esta campaña que cubre esos pasos,
+Andrea Melo: y
+Andres Felipe Cristancho: porque digamos que para cada paso no hay un evento. Entonces, también tenemos que mirar eso.
+Andrea Melo: claro, claro. Se puede
+Andres Felipe Cristancho: Después de que,
+Andrea Melo: observar.
+Andres Felipe Cristancho: bueno, después de que envía las fotos, está como un espacio,
+Andrea Melo: Tiene valencia.
+Andres Felipe Cristancho: un un espacio entre que envía las fotos y la prueban la cuenta, pero ese espacio es como unos cu o c días más o menos, a veces puede ser más. Entonces yo entonces ahí yo la pensé,
+Andrea Melo: Claro.
+Andres Felipe Cristancho: pues para evitar el eng para evitar que se caiga el engagement, pues queremos una cuenta para reforzar la comunicación y que no se pierda como la la motivación.
+ 
+ 
+00:17:29
+ 
+Andrea Melo: Claro, la emoción
+Andres Felipe Cristancho: Exacto. Y ese ese paso cubre ese esta campaña cubre tres pasos que es video,
+Andrea Melo: deía.
+Andres Felipe Cristancho: el envío el video, la revisión del backend y cuando se aprueba el usuario y ya después cuando se aprueba el usuario, pero no ha hecho su primer depósito, es otro paso. Entonces ahí es donde ataca esta campaña. Son seis campañas.
+Andrea Melo: Claro. Y eso en Colombia ahorita está dividido específicamente en seis flujos, o sea, seis campañas de customer,
+Andres Felipe Cristancho: Sí, es sí,
+Andrea Melo: ¿sabes?
+Andres Felipe Cristancho: sí, son estas seis, o sea, lo que tú ves allá en Customer,
+Andrea Melo: Ya,
+Andres Felipe Cristancho: o sea, que es super largo son estas seis,
+Andrea Melo: claro, claro.
+Andres Felipe Cristancho: tal y cual.
+Andrea Melo: Pero esas tú las creaste o Sebas las te las pasó y las modificaron.
+Andres Felipe Cristancho: No, no, yo las creé de ser con la misma ayuda de la
+Andrea Melo: Ay, okay, okay, buenísimo, porque esa era mi Claro, claro. Ya, s, sí, ahí sí me sirve porque y acá para que lo tengas un poquito en mapa,
+Andres Felipe Cristancho: herramienta.
+Andrea Melo: mira, te comparto rapidito. Este, no deja de compartir, solo fíjate mi pantalla.
+ 
+ 
+00:18:32
+ 
+Andrea Melo: E el flujo Perú es un poco diferente al flujo de Colombia al momento de que tengamos que meter las campañas. Eh, porque mira,
+Andres Felipe Cristancho: Sí.
+Andrea Melo: ¿sabes? Acá te te lo te lo explico como que el primero está el user create, eh, que es justamente el registro, ¿no?
+Andres Felipe Cristancho: Sí,
+Andrea Melo: Crea su perfil.
+Andres Felipe Cristancho: datos básicos.
+Andrea Melo: Siguiente basic data.
+Andres Felipe Cristancho: Sí.
+Andrea Melo: Ajá.
+Andres Felipe Cristancho: Ah, sí,
+Andrea Melo: Pero aquí no hay perfil de riesgo,
+Andres Felipe Cristancho: exacto.
+Andrea Melo: ¿sabes? Aquí de frente pasa a basic data. Basic data es este solamente correo o nombre, ¿no? Luego pasa a eh email verification,
+Andres Felipe Cristancho: Sí.
+Andrea Melo: el mensaje que le llega es el siguiente. Estos son los triggers y el siguiente es validación de identidad, ¿no? Donde mete toda la parte del DNI, etcétera, que es el KYC. E y luego ya es full user, ¿no? Y ya luego pasa recién ahí no lo he mapeado, pero obviamente está todo lo demás hasta el primer depósito, pero como ves, por ejemplo, acá no hay perfil de riesgo, eh,
+Andres Felipe Cristancho: Entonces sería el
+Andrea Melo: y el fanel es Claro, claro.
+ 
+ 
+00:19:34
+ 
+Andrea Melo: Es basic data email verification e data validation, como que la información como este tercero es la información completa donde te piden mucha información. Luego,
+Andres Felipe Cristancho: Datos completos.
+Andrea Melo: ajá, la validación de fotos, eh,
+Andres Felipe Cristancho: Ah, es una campaña menos.
+Andrea Melo: y luego ¿Cómo?
+Andres Felipe Cristancho: Ya es una campaña menos,
+Andrea Melo: ¿Cómo?
+Andres Felipe Cristancho: serían cinco campañas. O sea, ahí eliminamos la de perfil de riesgo y ya podemos Sí,
+Andrea Melo: Claro, claro.
+Andres Felipe Cristancho: porque son los mismos goals. Mira, te mostrar entonces datos básicos es
+Andrea Melo: dejo de
+Andres Felipe Cristancho: básicos esta,
+Andrea Melo: Ajá,
+Andres Felipe Cristancho: esta es toda la campaña de customer, o sea, tal cual tod todos esos nodos se desgan aquí en estos.
+Andrea Melo: ya.
+Andres Felipe Cristancho: Entonces,
+Andrea Melo: Ajá.
+Andres Felipe Cristancho: eh el trigger es create y la meta ahí es
+Andrea Melo: Ya. Basic, ya s.
+Andres Felipe Cristancho: basic.
+Andrea Melo: Y luego de basic data ya no va a perfil de riesgo, pues no. Ya de frente pasa
+Andres Felipe Cristancho: Datos completos. Esa es datos completos,
+Andrea Melo: a
+Andres Felipe Cristancho: que esa la tiene Felipe. Sí, datos completos que ahí quería cambiar el traer de R profile complete a data basic complete y se deja complet y
+ 
+ 
+00:20:51
+ 
+Andrea Melo: ajá. Tal cual, tal cual, tal cual.
+Andres Felipe Cristancho: listo.
+Andrea Melo: solamente eso. Claro, habría que cambiar eso, serían menos pasos, como dices tú, pero de todas formas ya tendríamos, o sea, el flujo, como que así sería en Perú. Eh, ay, me encanta. Te juro que yo puedo demasiado explico estas cosas porque no,
+Andres Felipe Cristancho: Exactamente.
+Andrea Melo: o sea, es tiempo que tiempo y aunque aunque no sé, tiempo. Entonces está está genial. Ahorita para cómo te ayudo, qué necesitas como para meterlo a Perú en contexto, como escuchaste igual en weekly, eh retención en el caso de Perú como es lo que le estado prestando más atención estos meses, entonces bien, pero activación yo lo he dejado. Entonces ahorita que ha venido Camu a ver retención, estoy mucho más foco ahora sí en activación y adquisición, ¿no? Y esto es activación. Y en activación e creo que justamente lo que dio,
+Andres Felipe Cristancho: Ah.
+Andrea Melo: ¿te acuerdas que pregunto? dijo, "Andre, como, ¿dónde crees que está el como que la bendera roja que está pasando?" Creería que un punto puede ser efectivamente que ese fanel no está yendo bien por los mensajes que no están convirtiendo y segundo también por el tipo de usuario que estamos trayendo.
+ 
+ 
+00:22:10
+ 
+Andrea Melo: O sea, también es una una hipótesis, ¿no?, que no hemos estado trayendo usuarios de tan alto valor o leads buenos que califiquen para inversión. Entonces, eh, pero eso lo vamos a resolver con esto, pues no. Entonces, ¿cómo le hacemos a nivel tiempo ahorita? Porque entiendo que es cuestión de medio duplicar y cambiar esos triggers como para montarlo de una vez en Perú, ¿no? Y ya luego yo me encargo de como estar dándole el review y ¿cómo lo ves? felices grandes.
+Andres Felipe Cristancho: Em ahí tocaría, que tú me dijeras, o sea, que te buscaras literalmente esas variables, o sea, lo que hace el usuario antes de hacer su primer depósito y qué variables macroeconómicas pueden afectar eso. Por ejemplo,
+Andrea Melo: C.
+Andres Felipe Cristancho: aquí en Colombia, aquí en Colombia yo puse todos los del funer,
+Andrea Melo: Mhm.
+Andres Felipe Cristancho: todas que son hartos pasos. Registro del registro, full account, tasa basic.
+Andrea Melo: Esos son esos son esos números. Espérate, no te termino de entender. son eh
+Andres Felipe Cristancho: Ah, bueno, es que listo.
+Andrea Melo: de
+Andres Felipe Cristancho: O sea, yo entré en el modelo con todos esos datos históricos desde el 2021.
+ 
+ 
+00:23:34
+ 
+Andrea Melo: Claro.
+Andres Felipe Cristancho: Pero para que él me diga bien, la próxima semana lo más probable es que sea este número, yo tengo que meterle los datos de la semana pasada.
+Andrea Melo: No.
+Andres Felipe Cristancho: O sea, el domingo, el domingo yo tengo que meterle los datos de la semana que pasó para que me proyecte y me la tendencia de la siguiente semana. Con eso él como ya sabe las tendencias históricas, me va a decir, por ejemplo, em la de callcap. Entonces, cuando el colcap tiende a variar harto positivamente, los primeros depósitos en tri también tienden a subir bastante.
+Andrea Melo: laf.
+Andres Felipe Cristancho: Entonces esta semana tenemos que darle prioridad a la comunicación del cola. Eso es lo que
+Andrea Melo: Okay.
+Andres Felipe Cristancho: hace.
+Andrea Melo: Ya. La variación del callup. Ya. Okay. Macro tienes variación del colcap. Tasa de inversión mensual. Eso de tasa de impresión mensual es ya y
+Andres Felipe Cristancho: es la tasa de interés del Banco de la República que que digamos
+Andrea Melo: la resultados reales.
+Andres Felipe Cristancho: ha servido harto por lo que la subieron.
+Andrea Melo: Ya.
+Andres Felipe Cristancho: Entonces los CT están más buenos. Entonces ahí también no lo optimizó para
+Andrea Melo: Okay.
+Andres Felipe Cristancho: eso
+ 
+ 
+00:24:51
+ 
+Andrea Melo: Todo lo que es soporte de CX, ¿de dónde lo sacaste?
+Andres Felipe Cristancho: soporte de CX. Esos son los tickets. Bueno, es que en CX ellos clasifican por etiquetas, entonces yo puedo descargar las etiquetas y filtrarlas por el tipo
+Andrea Melo: Mm.
+Andres Felipe Cristancho: de como de contexto. Entonces, yo descargué las que tenían que ver con lo que hace o pasa antes de que el primer que el usuario haga el primer
+Andrea Melo: Claro.
+Andres Felipe Cristancho: depósito.
+Andrea Melo: Okay. Ya. Y en canales entiendo que es a cuántos les ha estado llegando el mensaje o mensajes desde registro.
+Andres Felipe Cristancho: Exactamente.
+Andrea Melo: Ya.
+Andres Felipe Cristancho: Exactamente.
+Andrea Melo: Y esos son datos semanales que tú que habría que meter automáticamente,
+Andres Felipe Cristancho: Manales. Sí.
+Andrea Melo: pero manual. que este f es igual a
+Andres Felipe Cristancho: Y el entrenamiento es,
+Andrea Melo: 1.
+Andres Felipe Cristancho: o sea, si tú me los pasas en un Excel, ahí ya puedo empezar a trabajar,
+Andrea Melo: Y
+Andres Felipe Cristancho: pero tocaría mm como fechas de lunes a
+Andrea Melo: alamos
+Andres Felipe Cristancho: domingo, por ejemplo, del del lunes primero al domingo 7 de junio, o sea, así en ese en ese corte.
+Andrea Melo: ya.
+ 
+ 
+00:26:12
+ 
+Andrea Melo: Y no te sirve los de la semana pasada.
+Andres Felipe Cristancho: ¿Cómo
+Andrea Melo: O sea, ahorita que entiendo que hay que configurarlo,
+Andres Felipe Cristancho: así
+Andrea Melo: no deberíamos poner datos de la semana pasada hasta el domingo pasado acá.
+Andres Felipe Cristancho: en el histórico,
+Andrea Melo: Claro, porque entiendo que acá son
+Andres Felipe Cristancho: ah, acá? Ah, bueno,
+Andrea Melo: datos.
+Andres Felipe Cristancho: acá no toca la semana pasada en ese corte porque pues como te dije, entonces ya el modelo tiene un entrenamiento y sabe como esas, o sea, las probabilidades estadísticas de que las cosas pasen por este cor, pero digamos que esto no lo ven ustedes, sino que esto lo tengo que automatizar para que sea literalmente automático con
+Andrea Melo: Okay.
+Andres Felipe Cristancho: BQU porque puede que aquí saque esto, digamos, de canales. Entonces, digamos que esto no es tan relevante ni le de peso a las probabilidades ni a las valores estadísticos.
+Andrea Melo: Claro,
+Andres Felipe Cristancho: Entonces, digamos, podría ahorrar
+Andrea Melo: pero no crees que sería lo las mismas variables a Perú o me dices que o porque es un poco diferente el flujo,
+Andres Felipe Cristancho: estas.
+Andrea Melo: probablemente hayan otras variables porque, o sea, las variables que estoy viendo acá de macro, soporte, canales y arriba todo lo que son porcentajes, eh, claro, me hacen sentido.
+ 
+ 
+00:27:28
+ 
+Andrea Melo: ¿Creía que lo mismo hay de data en Perú o no sabemos
+Andres Felipe Cristancho: Yo creo que sí.
+Andrea Melo: eso,
+Andres Felipe Cristancho: Yo creo que debe tener la misma, pues eh quitando lo de lo de RIS y
+Andrea Melo: tasa de ris?
+Andres Felipe Cristancho: ya.
+Andrea Melo: Ajá. Aquí tenemos
+Andres Felipe Cristancho: Lo de canales también lo voy a eliminar de aquí porque no está teniendo como un peso relevante, no tiene tanta importancia estadística y lo de soporte pues también,
+Andrea Melo: ya en macro.
+Andres Felipe Cristancho: pero los datos macro sí los necesito y también sí y
+Andrea Melo: Sí, sí, sí. O sea, yo te paso
+Andres Felipe Cristancho: también los festivos y
+Andrea Melo: vari.
+Andres Felipe Cristancho: como fechas especiales más o menos como la prima esa
+Andrea Melo: Claro, claro. Como que cuando primas y esas cosas. Okay.
+Andres Felipe Cristancho: Exacto. Sí.
+Andrea Melo: Ya.
+Andres Felipe Cristancho: Y ya con eso
+Andrea Melo: Y por ejemplo data como tipo, imagínate cuando hay esto acá en macro también entra lo de resultados trimestrales,
+Andres Felipe Cristancho: vamos.
+Andrea Melo: que no es data macro, ¿no? Pero a ver, cuando hay resultados trimestrales, acciones fuertes que se mueven, las más negociadas, eso no debería eso también es data que tú puedes meter como para esos mensajes de primeras activaciones.
+ 
+ 
+00:28:38
+ 
+Andrea Melo: ¿Te lo paso aquí en variables o va en otra
+Andres Felipe Cristancho: Eso podríamos pasarlo,
+Andrea Melo: categoría?
+Andres Felipe Cristancho: sí, pero uf, es que es que la es que tampoco podemos meterle muchas variables porque se sobre hace overfitting y después ya hace las cosas mal. Entonces, tenemos que ir como reentrenándolo y robusteciéndolo a medida que vayamos mejorando,
+Andrea Melo: Claro, claro.
+Andres Felipe Cristancho: porque eso de las de esos de los precios y todo ese
+Andrea Melo: Ok.
+Andres Felipe Cristancho: contexto, eso también se me hace buenísimo, porque podríamos hacer una un tipo de personalización más enfocada, por lo que tenemos perfiles de riesgo.
+Andrea Melo: Tal cual. A lo menos este, claro, en Colombia que está mucho más eso. O sea, es que sí. Y esto es la conversación que ha venido desde que yo me acuerdo entre esto del carrito de este como que el carrito abandonado, ¿no? De cuando una persona no termina de comprar una acción, no solamente que te llegue como, oye, revisa tal acción, sino que si tuvieras la manera de que te llegue el precio,
+Andres Felipe Cristancho: Sí.
+Andrea Melo: ¿no? Y las actualizaciones de precio, creo que eso sería un push demasiado grande. Entonces, eventualmente
+Andres Felipe Cristancho: es que bueno, te doy contexto. Esta herramienta, digamos que no la tenía mapeada para Tri por, o sea, por algún requerimiento o algo que haya visto, sino que desde que entré a Triz yo venía con la idea de que yo quería emprender.
+ 
+ 
+00:30:07
+ 
+Andres Felipe Cristancho: Entonces, vi problemas en CX y en un poco de de qué de cosas y pues fui iterando, fui iterando, iterando, iterando y encontrando problemas y solucionando y este ha sido el resultado. Digamos que esto es que aunque lo estamos probando en tri, yo lo quiero sacar como producto para emprender. Y la segunda fase de este producto es la personalización por individuo,
+Andrea Melo: Ay,
+Andres Felipe Cristancho: que es así tal cual lo que hiciste
+Andrea Melo: encanta. Ay, me encanta.
+Andres Felipe Cristancho: tú.
+Andrea Melo: Me encanta. Y y no hay de esto como que un SAS que tú hayas visto en como que en YC, porque yo he buscado como SAS de funels y como esta etapa de conversiones, he encontrado dos pero de cohots antiguos. Hay actuales, ¿te has fijado de eso?
+Andres Felipe Cristancho: Yo vi una que se llama Offerfit y fue adquirida por Brace como por 300 millones de dólares y lo que hacían ellos era la capa
+Andrea Melo: Ya.
+Andres Felipe Cristancho: dos, o sea, lo que tú estás diciendo de personalización, pero ellos lo hacían con modelos de entrenamiento por refuerzo. Entonces, yo quiero, además de agregarle ese entrenamiento por refuerzo para hacer hiperpersonalización,
+Andrea Melo: Claro.
+Andres Felipe Cristancho: montarle estas tendencias macros.
+Andrea Melo: Creo que lo de macro me parece buenísimo porque como dices yo estas dos que vi eran más justo hiper personalización para la última etapa de compra, ¿no?
+ 
+ 
+00:31:39
+ 
+Andrea Melo: Que es a lo que más se ha metido como todo el poder agéntico de hiperpersonalización para venta, ¿no? Eh, entonces, pero la combinación con datos macro creo que está chévere. Y si imagínate, lo haces tan como se ven ahorita, como que digo, como funcionan realmente los as, ¿no? Como de manera más todo el fanel, todo el fanel. Mientras más grande creo que mucho más válido y es una sola herramienta, ¿no? Me encanta de una, de una, de una emoción. Entonces, a probarte vamos a probar y ya no hay mucha suerte con eso. Ya cuando saque feliz apoyarte ahí, pero con
+Andres Felipe Cristancho: De hecho iba a empezar a buscar como en otras fintech a ver si tenían el mismo problema como
+Andrea Melo: es
+Andres Felipe Cristancho: para empezar a validar
+Andrea Melo: Claro. Yo yo te diría que,
+Andres Felipe Cristancho: más.
+Andrea Melo: o sea, todo, el problema es la, o sea, el hecho de que tú vengas, o sea, me gusta la herramienta, pero a lo que yo he visto, por ejemplo, cuando me venían con SAS o conversando, a mí todavía me gusta meterme a todo lo que es, obviamente yo no estoy por Inventure Capital, y siempre que revisamos este tipo de SAS o más como slash CRMs o que venían para esta parte de los panels, el problema más grave, no te miento, que es lo difícil que es eh entender la herramienta para el equipo.
+ 
+ 
+00:32:55
+ 
+Andrea Melo: O sea, si tú lo eras la adaptación de esta herramienta en,
+Andres Felipe Cristancho: Listo.
+Andrea Melo: no sé, un día, dos días para el equipo, es buenísimo. Versus que tú no lo hagas, no sé, que lo hagas en un mes, ¿me entiendes? Y esto de acá,
+Andres Felipe Cristancho: Sí.
+Andrea Melo: eh, me parece genial. Creo que es que a nivel UI maybe lo mejoraría, ¿sabes? que no está feo,
+Andres Felipe Cristancho: Ah, sí, no, sí,
+Andrea Melo: que no está feo,
+Andres Felipe Cristancho: sí está feo.
+Andrea Melo: ¿no? Que no está tan feo, pero es que tú sabes, mientras menos info visual y más rápido entender,
+Andres Felipe Cristancho: Sí,
+Andrea Melo: p****, sale para arriba. Y creo que es eso, cuando te vayas a pilotear con startups,
+Andres Felipe Cristancho: así.
+Andrea Melo: eh, sería que lleves el producto ya a ese nivel como UI amigable para que la gente diga, "Ah, qué bacán, como lo piloteo una semana y te cuento, ¿no? Porque si no va a dar mucha fricción de p****, no le entiendo y esas cosas."
+Andres Felipe Cristancho: Es que sí, es que ese que tuviste, eh,
+Andrea Melo: Ajá.
+Andres Felipe Cristancho: no sé por qué Cloud Cot me lo tomó como como con esos colores, no sé, porque yo la, o sea, la mía la estaba pensando como algo más así más más
+ 
+ 
+00:34:06
+ 
+Andrea Melo: limpio.
+Andres Felipe Cristancho: como antigravity que me encanta.
+Andrea Melo: Ya. Ajá.
+Andres Felipe Cristancho: No sé si la has visto.
+Andrea Melo: Claro. Sí, sí, sí.
+Andres Felipe Cristancho: Es que es demasiado
+Andrea Melo: Claro, es mucho más limpio.
+Andres Felipe Cristancho: bueno.
+Andrea Melo: Claro, un diseño mucho más limpio, minimalista con datos puntuales.
+Andres Felipe Cristancho: Exacto. Sí.
+Andrea Melo: No,
+Andres Felipe Cristancho: Entonces estaba intentando hacer algo como
+Andrea Melo: no, claro,
+Andres Felipe Cristancho: parecido.
+Andrea Melo: claro, claro. No, pero claro. Y es un poco más iteración UI y queda queda totalmente,
+Andres Felipe Cristancho: Sí.
+Andrea Melo: pero o sea, justo aprovecha ahorita pues que está que todo el equipo en realidad lo tiene que usar. Lo probamos. comoéralo fácil, o sea,
+Andres Felipe Cristancho: Sí.
+Andrea Melo: depende, ¿no? Lo iteras como yo, ahí, no sé si para trío aparte y ya luego lo sacas con piloto para alguna fintex, pero lo quieres para fintex o para que claro funcionaría fintex porque lo tienes armado para
+Andres Felipe Cristancho: Sí,
+Andrea Melo: fintex.
+Andres Felipe Cristancho: yo creo que igual como dicen como esas mentorías de YC, eh, yo creo que empezar muy nicho y como ya digamos puedo tener ventaja en que ya tengo esos datos macro digamos de Colombia,
+ 
+ 
+00:35:12
+ 
+Andrea Melo: Ha.
+Andres Felipe Cristancho: entonces puedo reutilizarlos. Y otra cosa que estaba pensando también que sería muy bueno, muy bueno es sacar datos estadísticos de lo que le funciona a una para venderlo como benchmark que sería
+Andrea Melo: Pero sí,
+Andres Felipe Cristancho: también un plus.
+Andrea Melo: no, porque fíjate que ahí sí te dirían,
+Andres Felipe Cristancho: Sí.
+Andrea Melo: a ver, es como si tú, imagínate, le vendieras esto a un racional, a un XTB, te lo compran,
+Andres Felipe Cristancho: Sí.
+Andrea Melo: obviamente van a pedirte privacidad de data y que tú luego vendas como esa data en a nivel benchmark, o sea, es buenísimo, pero no te van a dejar, pues, o cómo lo piensas.
+Andres Felipe Cristancho: Ah, bueno, sí. O sea, no no la data como tal, sino como un resultado interno de que al procesar los datos de las fintech y procesando el contexto macro, yo pueda tener mis propias variables como empresa, o sea, no robando esos datos, sino sacando estadísticamente las probabilidades de mejora y de conversión de los que yo tengo. O sea, sería como una data interna mía.
+Andrea Melo: Okay. como que una data, ay, se me fue la palabra, como promedio de la industria actualizada que tú,
+ 
+ 
+00:36:45
+ 
+Andres Felipe Cristancho: Exacto.
+Andrea Melo: pero a quién se lo vendí como que Findex que quieran entrar a
+Andres Felipe Cristancho: A otras fintech.
+Andrea Melo: mercado.
+Andres Felipe Cristancho: Exacto. Como vea, yo ya tengo experiencia en lo que en cómo se comunica en las probabilidades estadísticas para ciertos perfiles de riesgo, para cierto tipo de cosas. Si se viene con nosotros, pues nosotros le damos acceso a este a estos datos.
+Andrea Melo: Ya, sí, te sigo. Sí, igual no sería maybe la, o sea, como que el canal de venta más fuerte porque acuérdate que, o sea, claro, tu público sería un finex iniciando que no tiene poder de como que no
+Andres Felipe Cristancho: Sí,
+Andrea Melo: te van a pagar mucho, ¿me entiendes? Pero esto acá,
+Andres Felipe Cristancho: sí.
+Andrea Melo: o sea, me lo pensaría de cómo pudiéramos como cómo la lo conectas con banca tradicional. Yo sé, no tiene nada que ver, pero acuérdate que tienes datos financieros y de inversión. Todos los todos los grupos crediticios grandes de a lo menos la TAM, todos tienen su brazo inversor. Creo que ahí, o sea, no, ahorita no se me ocurre, sería cuestión de pensar y y si la pienso, te cuento como para que pienses, pero siento que ahí puede estar el mercado, ¿sabes?
+ 
+ 
+00:38:05
+ 
+Andrea Melo: Porque claro, estás ahorita con esta parte más fintech, pero te juro que vender banca tradicional, o sea, ellos son los que tienen los tickets. Entrar ahí
+Andres Felipe Cristancho: Es que yo sí yo lo pensé también, o sea, por fintech,
+Andrea Melo: sería.
+Andres Felipe Cristancho: porque digamos para validar, ¿no? Pero digamos que esta herramienta iría mucho más allá porque lo que tengo planeado es literalmente replicar la comunicación de customero, que es el envío de las comunicaciones, literalmente copiarlo tal cual.
+Andrea Melo: Mm.
+Andres Felipe Cristancho: y meterle esta capa de inteligencia encima. Entonces, ya no tendría que usar la API Cristión Merido,
+Andrea Melo: Mhm.
+Andres Felipe Cristancho: sino que sería la plataforma propia y se crearían
+Andrea Melo: Claro,
+Andres Felipe Cristancho: flujos,
+Andrea Melo: claro.
+Andres Felipe Cristancho: segmentos sobre datos de estos. Y tienes muchísima razón porque la data tradicional tiene millones de datos históricos, o sea,
+Andrea Melo: Millones
+Andres Felipe Cristancho: sería muchísimo mejor porque aquí lo tenemos desde el 2021.
+Andrea Melo: de Claro, imagínate. Ay, no, escúchame. Ya, me encanta. O sea, si lo sigue desarrollando como que dale tiempo y claro, tú tienes más Colombia, eh, pero yo te podría ayudar si quieres, como acá y te conecto con bancos como Perú, grupos crediticios que, bueno, ahí, o sea, con los equipos ideales como para que pilotees, pruebes y sí, o sea, por ahí por contactos como yo creo que se puede lograr y tú puedas conseguir el esto o quas un P cortito, no sé, pero igual te sirve.
+ 
+ 
+00:39:37
+ 
+Andrea Melo: Entonces, oye, dale, dale, porque no, yo siento que es timing porque justamente un customero, obviamente ya está haciendo eso y es cuestión de timing, pues así que sí,
+Andres Felipe Cristancho: Sí,
+Andrea Melo: sí, sí,
+Andres Felipe Cristancho: sí,
+Andrea Melo: no, emocionada, emocionada, emocionada. Me encantó.
+Andres Felipe Cristancho: sí, sí, está muy bueno.
+Andrea Melo: Qué genial.
+Andres Felipe Cristancho: A mí me encanta. Es que el margen de error de las proyecciones es menor a 10% y me puse a buscar y eso es casi imposible con los datos que hay. Imagino un banco que tiene por allá desde el
+Andrea Melo: Claro, claro, claro.
+Andres Felipe Cristancho: 2000.
+Andrea Melo: Y y un dato más, este es muy gracioso como y yo te digo por eso con con el momento en el que creo si logras desarrollar la herramienta y que te consigas la data de un grupo crediticio grande por contactos, porque te hiciste amigo, yo que sé, creo que eso es lo que si si hubiera una competencia que está haciendo lo mismo que tú y tú quieres quisieras postular cualquier aceleradora gigante, levantar capital, lo que sea, eso es lo que te va a diferenciar. Lo digo porque, o sea, te juro que muchas de las conversaciones cuando invertíamos en como que Finex o Finex/healthX siempre eh en comparación a veces había un equipo buenísimo con un producto gigantesco, o sea, a nivel tecnológico alto versus el otro equipo que no tenía tanto nivel techo, pero lo que tenía era data y venían diciendo, no sé, tenemos la data del Banco de España desde el 2011 y hemos entrenado los modelos con esto y tenemos apertura de seguir actualizando esa data por el convenio que tenemos con el banco,
+ 
+ 
+00:41:11
+ 
+Andrea Melo: porque no sé, el founder trabajó ahí, ¿no? Entonces tiene la condición y la data. Entonces lo que te va a diferenciar realmente acá es data y logras conseguir la data de grupo crediticio grande en Latinoamérica, ya volas con eso.
+Andres Felipe Cristancho: Sí, o sea, sería como lo que está haciendo en tri,
+Andrea Melo: Sí.
+Andres Felipe Cristancho: porque digamos el modelo se reentrena cada semana, o sea, le metemos datos, se reentrena y eso es difícil de replicar. Sí,
+Andrea Melo: Claro, claro.
+Andres Felipe Cristancho: exacto.
+Andrea Melo: Tal cual. Entonces ya cruzando, cruzando los dedos, tú confías.
+Andres Felipe Cristancho: Sí.
+Andrea Melo: Parece buenísimo. Productazo. Así que más bien aprovechamos ahorita. Aprovechamos ahorita, eh, metémosle data full Colombia, aprovecha que Perú es más Chile tienes como que vas a tener tres mercados para jugar, probar y ver.
+Andres Felipe Cristancho: Si de una.
+Andrea Melo: Así que y sí,
+Andres Felipe Cristancho: Listo. Voy a hacer de
+Andrea Melo: ya. Pues entonces eh de mi lado te paso para esto te paso data
+Andres Felipe Cristancho: una.
+Andrea Melo: de macro Perú, ¿cierto? ¿Algo más
+Andres Felipe Cristancho: Sí.
+ 
+ 
+00:42:15
+ 
+Andrea Melo: quees?
+Andres Felipe Cristancho: Eh, esa data. U es que no sé en Perú desde qué fecha hayan los datos de usuario.
+Andrea Melo: Creería que obviamente menos que Colombia, ¿no? Si en Colombia tienes 2000
+Andres Felipe Cristancho: 21. Sí, ese es un
+Andrea Melo: 20 fácil los últimos tres cu 3 años por
+Andres Felipe Cristancho: problema.
+Andrea Melo: ahí más fácil 2021 22 debe ser, ¿no? es por ahí,
+Andres Felipe Cristancho: Sí.
+Andrea Melo: pero igual sirve lo que haya, creo.
+Andres Felipe Cristancho: p****, es que entre menos datos históricos es un poquito más complejo,
+Andrea Melo: Peor
+Andres Felipe Cristancho: ¿no?
+Andrea Melo: sí,
+Andres Felipe Cristancho: Pero pero yo creo que con esos con esos empecemos de una.
+Andrea Melo: ya. Okay. Okay. Y a nivel tiempos más o menos para cuándo podríamos como tenerlo configurado. Lo digo para cuando Juan, mañana voy a tenerlo con Juanis eh, para justamente contarle como toda esta parte de activación que es literalmente esto. Entonces, ¿cómo le podrá ir diciendo como a nivel tiempo?
+Andres Felipe Cristancho: Sería, yo creo que viernes de la otra semana ya está listo.
+Andrea Melo: viernes de la otra semana. Okay, okay, okay.
+Andres Felipe Cristancho: Ya está todo configurado para que sea lo mismo,
+Andrea Melo: Ya,
+Andres Felipe Cristancho: o sea, que ya esté todo montado.
+Andrea Melo: ya.
+Andres Felipe Cristancho: M.
+Andrea Melo: Okay, listo. Ya le le aviso entonces. Eh, y sí, igual si es que por ahí hay como yo sé que obviamente estás con más cosas, si hay priorización o algo, como igual sería buenísimo preguntarle a Juanis. Lo digo porque tú sabes que activación ahorita pero está en rojos, entonces si hay que meterle más push y esto obviamente va a llevar muchísimo, así que si se puede antes es genial. Si no igual voy con esa fecha con Juaniso.
+Andres Felipe Cristancho: Listo.
+Andrea Melo: Listo. Entonces eso por el momento. Entonces no me meto la herramienta, o sea, ya estoy dentro, pero digo, no hago nada, simplemente la veo y ya.
+Andres Felipe Cristancho: Sí, igual ahí ya están, o sea, ya quedó todo actualizado. Entonces tocaría el lunes
+Andrea Melo: Mm. Sí.
+Andres Felipe Cristancho: de
+Andrea Melo: Ya. Okay. Okay. Listo. Entonces, quedamos así. Mucha mucha suerte. Ya me vas contando. Pues listo.
+Andres Felipe Cristancho: gracias a ti.
+Andrea Melo: Bye.
+Andres Felipe Cristancho: No.
+ 
+ 
+La transcripción finalizó después de 00:44:52
+
+Esta transcripción editable se ha generado por ordenador y puede contener errores. Los usuarios también pueden cambiar el texto después de que se haya generado.

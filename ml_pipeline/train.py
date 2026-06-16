@@ -31,10 +31,10 @@ import optuna
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 
 from ml_pipeline.config import (
+    ALL_CSV_FEATURES,
     COMPUTED_FEATURE_NAMES,
-    EWMA_SPAN,
-    EWMA_VARIABLES,
     INITIAL_TRAIN_WEEKS,
+    LOSS_OBJECTIVE,
     MULTICOLLINEARITY_THRESHOLD,
     OPTUNA_MAX_DEPTH_RANGE,
     OPTUNA_N_TRIALS,
@@ -57,6 +57,7 @@ from ml_pipeline.data_contracts import (
 from ml_pipeline.feature_engineering import (
     build_feature_matrix,
     csv_bytes_to_dataframe,
+    load_csv,
     prepare_base_df,
 )
 from ml_pipeline.validation import walk_forward_splits
@@ -107,6 +108,18 @@ def run_training(csv_path: Path) -> dict:
     df = prepare_base_df(df)
     logger.info("[Fase 0] DataFrame listo: %d filas.", len(df))
 
+    # Excluir semanas exógenas (campañas internas, outliers confirmados).
+    # ml_runner.py NO aplica este filtro: usa el CSV completo para calcular lags.
+    # Acepta tanto 'es_exogena' como 'es_exogeno' (variante del CSV)
+    _exo_col = next((c for c in ("es_exogena", "es_exogeno") if c in df.columns), None)
+    if _exo_col:
+        n_antes = len(df)
+        df = df[df[_exo_col] != 1].copy()
+        logger.info(
+            "[Fase 0] Semanas exógenas excluidas (%s): %d → %d filas de entrenamiento.",
+            _exo_col, n_antes, len(df),
+        )
+
     # Fase 1: Contratos
     logger.info("[Fase 1] Validando contratos de datos...")
     ok, violations = validate_data_contracts(df)
@@ -123,13 +136,13 @@ def run_training(csv_path: Path) -> dict:
     logger.info("[Fase 2] Aplicando target clipping (p%d)...", TARGET_CLIP_PERCENTILE)
     y_full = clip_target_to_percentile(y_full, TARGET_CLIP_PERCENTILE)
 
-    # Fase 2.3: Poda multicolinealidad (solo variables tiempo t)
+    # Fase 2.3: Poda multicolinealidad (solo ALL_CSV_FEATURES — tiempo t)
+    # Las COMPUTED_FEATURE_NAMES quedan fuera de esta poda (ver data_contracts.prune_multicollinearity).
     logger.info("[Fase 2.3] Poda multicolinealidad (threshold=%.2f)...", MULTICOLLINEARITY_THRESHOLD)
-    computed_and_ewma = list(COMPUTED_FEATURE_NAMES) + [f"{v}_ewma_{EWMA_SPAN}" for v in EWMA_VARIABLES]
-    time_t_cols = [f for f in feature_names if f not in computed_and_ewma]
-    other_cols = [f for f in feature_names if f in computed_and_ewma]
-    surviving = prune_multicollinearity(X_full, time_t_cols, MULTICOLLINEARITY_THRESHOLD)
-    feature_names = surviving + other_cols
+    csv_time_t = [f for f in feature_names if f in ALL_CSV_FEATURES]
+    computed_cols = [f for f in feature_names if f in COMPUTED_FEATURE_NAMES]
+    surviving = prune_multicollinearity(X_full, csv_time_t, MULTICOLLINEARITY_THRESHOLD)
+    feature_names = surviving + computed_cols
     X_full = X_full[feature_names]
 
     X = X_full.values
@@ -151,7 +164,7 @@ def run_training(csv_path: Path) -> dict:
 
     def objective(trial: optuna.Trial) -> float:
         params = {
-            "objective": "reg:squarederror",
+            "objective": LOSS_OBJECTIVE,
             "max_depth": trial.suggest_int("max_depth", depth_lo, depth_hi),
             "min_child_weight": trial.suggest_int("min_child_weight", mcw_lo, mcw_hi),
             "subsample": trial.suggest_float("subsample", sub_lo, sub_hi),
@@ -179,7 +192,7 @@ def run_training(csv_path: Path) -> dict:
     logger.info("[Fase 5] Entrenamiento final...")
     num_boost_round_final = best_params.pop("num_boost_round", 100)
     xgb_params = {k: v for k, v in best_params.items()}
-    xgb_params.update({"objective": "reg:squarederror", "tree_method": "hist", "seed": 42})
+    xgb_params.update({"objective": LOSS_OBJECTIVE, "tree_method": "hist", "seed": 42})
     best_params["num_boost_round"] = num_boost_round_final
 
     dtrain_full = xgb.DMatrix(X, label=y, feature_names=feature_names)

@@ -4,11 +4,12 @@ Conexión a Supabase y operaciones sobre las dos tablas del proyecto:
   - ultima_semana             (fila de la semana actual)
 
 Mapeo de columnas:
-  Supabase usa lowercase para macro (tasa_intervencion_mensual, trm, variacion_colcap).
-  El ML pipeline espera (Tasa_Intervencion_Mensual, TRM, Variacion_COLCAP).
-  _to_ml() y _to_supabase() manejan la conversión automáticamente.
+  Supabase almacena TRM como 'trm' (lowercase).
+  El ML pipeline lo espera como 'TRM' (uppercase).
+  _to_ml() maneja la conversión automáticamente.
 """
 
+import math
 import os
 import logging
 from pathlib import Path
@@ -26,15 +27,46 @@ SUPABASE_URL: str = os.getenv("SUPABASE_URL") or os.getenv("NEXT_PUBLIC_SUPABASE
 SUPABASE_KEY: str = os.getenv("SUPABASE_SERVICE_ROLE_KEY") or ""
 
 # Columnas que existen en Supabase pero NO son features del modelo ML
-NON_ML_COLS = {"intervencion_kepler"}
+NON_ML_COLS = {"es_exogeno"}
 
 # Columnas con nombres distintos entre Supabase y el pipeline ML
+# Solo TRM: Supabase lo guarda lowercase, el pipeline lo espera uppercase
 SUPABASE_TO_ML: dict[str, str] = {
-    "tasa_intervencion_mensual": "Tasa_Intervencion_Mensual",
     "trm": "TRM",
-    "variacion_colcap": "Variacion_COLCAP",
 }
 ML_TO_SUPABASE: dict[str, str] = {v: k for k, v in SUPABASE_TO_ML.items()}
+
+
+def _make_json_safe(obj: Any) -> Any:
+    """
+    Convierte recursivamente tipos no-JSON-serializables antes de insertar en Supabase.
+
+    Casos cubiertos:
+    - float('nan') / float('inf') → None  (causa más frecuente: SHAP sobre inputs NaN)
+    - numpy.float64/32/16 → Python float (o None si nan/inf)
+    - numpy.int64/32/16/8 → Python int
+    - numpy.bool_ → Python bool
+    - numpy.ndarray → list
+    - dict / list → aplica recursivamente
+    """
+    if isinstance(obj, dict):
+        return {k: _make_json_safe(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_make_json_safe(v) for v in obj]
+    if isinstance(obj, float):
+        return None if (math.isnan(obj) or math.isinf(obj)) else obj
+    # numpy types — por nombre para no requerir import numpy aquí
+    tp = type(obj).__name__
+    if tp in ("float64", "float32", "float16", "float128"):
+        v = float(obj)
+        return None if (math.isnan(v) or math.isinf(v)) else v
+    if tp in ("int64", "int32", "int16", "int8", "uint64", "uint32", "uint16", "uint8"):
+        return int(obj)
+    if tp == "bool_":
+        return bool(obj)
+    if tp == "ndarray":
+        return _make_json_safe(obj.tolist())
+    return obj
 
 
 def _get_client() -> Client:
@@ -146,17 +178,20 @@ def save_prediction_result(result: dict[str, Any], semana_label: str | None = No
     """
     Guarda el resultado completo de una predicción en prediction_results.
     Inserta siempre una fila nueva (historial de predicciones).
+    _make_json_safe() convierte float('nan')/numpy types antes del insert para
+    evitar fallos de serialización cuando algún input feature fue NaN.
     """
     client = _get_client()
+    safe = _make_json_safe(result)
     row = {
-        "semana_datos":   result.get("semana_datos"),
-        "semana_label":   semana_label or result.get("semana_label"),
-        "prediccion":     result.get("prediccion_siguiente_semana"),
-        "baseline_12w":   result.get("baseline_12w"),
-        "brecha":         result.get("brecha_vs_baseline"),
-        "mae_modelo":     result.get("mae_modelo"),
-        "modelo_version": result.get("modelo_version"),
-        "full_result":    result,
+        "semana_datos":   safe.get("semana_datos"),
+        "semana_label":   semana_label or safe.get("semana_label"),
+        "prediccion":     safe.get("prediccion_siguiente_semana"),
+        "baseline_12w":   safe.get("baseline_12w"),
+        "brecha":         safe.get("brecha_vs_baseline"),
+        "mae_modelo":     safe.get("mae_modelo"),
+        "modelo_version": safe.get("modelo_version"),
+        "full_result":    safe,
     }
     res = client.table("prediction_results").insert(row).execute()
     saved = res.data[0] if res.data else row
@@ -266,11 +301,12 @@ def get_funnel_context() -> list[dict[str, Any]]:
 def save_strategy_result(strategy: dict[str, Any]) -> dict[str, Any]:
     """Guarda el resultado de una estrategia generada en strategy_results."""
     client = _get_client()
+    safe = _make_json_safe(strategy)
     row = {
-        "semana_label":  strategy.get("semana_label"),
-        "estado_funnel": strategy.get("estado_funnel"),
-        "resumen":       strategy.get("resumen"),
-        "full_result":   strategy,
+        "semana_label":  safe.get("semana_label"),
+        "estado_funnel": safe.get("estado_funnel"),
+        "resumen":       safe.get("resumen"),
+        "full_result":   safe,
     }
     res = client.table("strategy_results").insert(row).execute()
     saved = res.data[0] if res.data else row
@@ -379,16 +415,18 @@ def log_node_update(
         logger.warning("log_node_update: no se pudo registrar (user=%s, action=%s): %s", user_name, action_id, exc)
 
 
-def get_sent_nodes(semana_label: str) -> list[int]:
-    """Devuelve los action_ids ya enviados para la semana indicada."""
+def get_sent_nodes(semana_label: str, after: str | None = None) -> list[int]:
+    """
+    Devuelve los action_ids ya enviados para la semana indicada.
+    after: ISO timestamp — solo cuenta nodos enviados a partir de esa fecha/hora.
+    Usado para aislar el estado de una estrategia concreta vs. sesiones anteriores.
+    """
     try:
         client = _get_client()
-        res = (
-            client.table("node_update_log")
-            .select("action_id")
-            .eq("semana_label", semana_label)
-            .execute()
-        )
+        q = client.table("node_update_log").select("action_id").eq("semana_label", semana_label)
+        if after:
+            q = q.gte("created_at", after)
+        res = q.execute()
         return [r["action_id"] for r in (res.data or [])]
     except Exception as exc:
         logger.warning("get_sent_nodes: error consultando log (semana=%s): %s", semana_label, exc)
@@ -595,6 +633,12 @@ def insert_knowledge_base_entry(tipo: str, titulo: str, contenido: str) -> dict[
         .execute()
     )
     return res.data[0] if res.data else {}
+
+
+def delete_knowledge_base_entry(entry_id: str) -> None:
+    """Elimina permanentemente una entrada del knowledge_base por su id."""
+    client = _get_client()
+    client.table("knowledge_base").delete().eq("id", entry_id).execute()
 
 
 # ─── Fase 4: Medición — snapshots manuales ───────────────────────────────────

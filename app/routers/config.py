@@ -6,6 +6,7 @@ from pydantic import BaseModel
 from app.services.supabase_client import (
     add_tracked_campaign,
     delete_tracked_campaign,
+    delete_knowledge_base_entry,
     get_all_knowledge_base,
     get_campaigns_cache,
     insert_knowledge_base_entry,
@@ -95,6 +96,15 @@ def add_kb_entry(body: AddKBPayload) -> dict[str, Any]:
         raise HTTPException(status_code=422, detail="tipo, titulo y contenido son obligatorios")
     try:
         return insert_knowledge_base_entry(tipo, titulo, contenido)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@router.delete("/knowledge-base/{entry_id}")
+def delete_kb_entry(entry_id: str) -> dict[str, Any]:
+    try:
+        delete_knowledge_base_entry(entry_id)
+        return {"ok": True, "deleted": entry_id}
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 

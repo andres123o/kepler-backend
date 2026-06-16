@@ -22,7 +22,7 @@ _BACKEND = Path(__file__).resolve().parent.parent.parent
 if str(_BACKEND) not in sys.path:
     sys.path.insert(0, str(_BACKEND))
 
-from ml_pipeline.config import BENCHMARK_WINDOW_WEEKS, TARGET_NAME
+from ml_pipeline.config import BENCHMARK_WINDOW_WEEKS, NON_ACTIONABLE_FEATURES, TARGET_NAME
 from ml_pipeline.data_contracts import validate_data_contracts
 from ml_pipeline.feature_engineering import build_feature_matrix, prepare_base_df
 from ml_pipeline.train import run_training as _pipeline_train
@@ -221,12 +221,20 @@ def run_prediction() -> dict[str, Any]:
         shap_values = shap_values[0]
     contribs = shap_values[0]
 
+    def _safe_contrib(v) -> float | None:
+        """float() seguro — devuelve None si NaN/Inf (SHAP sobre inputs NaN)."""
+        try:
+            f = float(v)
+            return None if (f != f or f == float("inf") or f == float("-inf")) else f
+        except (TypeError, ValueError):
+            return None
+
     shap_list = sorted(
         [
             {
                 "feature": name,
                 "value": None if pd.isna(last_row[name].iloc[0]) else float(last_row[name].iloc[0]),
-                "contribution": float(contribs[i]),
+                "contribution": _safe_contrib(contribs[i]) or 0.0,
             }
             for i, name in enumerate(model_features)
         ],
@@ -234,10 +242,14 @@ def run_prediction() -> dict[str, Any]:
         reverse=True,
     )
 
+    # Filtrar features no accionables del display (funnel interno + autoregresivo)
+    # El modelo las usa para predecir pero Marketing no puede actuar sobre ellas vía CIO.
+    shap_display = [s for s in shap_list if s["feature"] not in NON_ACTIONABLE_FEATURES]
+
     # 10. Contexto histórico (z-scores vs. últimas 12 semanas)
     X_hist_ctx = X_full.iloc[:-1]
     contexto = []
-    for s in shap_list[:20]:
+    for s in shap_display[:20]:
         f = s["feature"]
         val = s["value"]
         if f in X_hist_ctx.columns:
@@ -256,13 +268,13 @@ def run_prediction() -> dict[str, Any]:
             "shap_contribution": round(s["contribution"], 4),
         })
 
-    # 11. Prescripción
+    # 11. Prescripción — evalúa todos los features del contexto, no solo el top 5
     prescripcion = []
-    for item in contexto[:5]:
+    for item in contexto:
         feat = item["feature"]
         z = item["z_score"]
         contrib = item["shap_contribution"]
-        if z is None or abs(z) < 1.0:
+        if z is None or abs(z) < 0.5:
             continue
         accion: dict[str, Any] = {
             "variable": feat,
@@ -271,23 +283,23 @@ def run_prediction() -> dict[str, Any]:
             "direccion": "negativa" if contrib < 0 else "positiva",
             "severidad": "crítica" if abs(z) > 2.0 else "alerta" if abs(z) > 1.5 else "monitorear",
         }
-        if "push_mail" in feat:
-            accion["tipo_accion"] = "revisar_campanas_customer_io"
-        elif "tasa_" in feat and "kyc" not in feat:
-            accion["tipo_accion"] = "campana_ayuda_onboarding"
-        elif "rechazo" in feat or "kyc" in feat or "cx_friccion" in feat:
-            accion["tipo_accion"] = "alerta_tech_soporte"
-        elif "cx_bloqueos" in feat:
-            accion["tipo_accion"] = "alerta_soporte"
-        elif "registro" in feat or "aprobados" in feat:
-            accion["tipo_accion"] = "monitorear_adquisicion"
-        elif feat in ("TRM", "Variacion_COLCAP", "Tasa_Intervencion_Mensual"):
+        if feat in NON_ACTIONABLE_FEATURES:
+            accion["tipo_accion"] = "monitorear_no_accionable"
+        elif feat in ("TRM", "sp500_cambio_semanal_pct", "brent_cambio_semanal_pct",
+                      "colcap_cambio_semanal_pct", "spread_tes_banrep"):
             accion["tipo_accion"] = "contexto_macro"
-        elif "dias_habiles" in feat or "semana_del_mes" in feat or "mes_prima" in feat:
+        elif feat in ("trends_cdt", "trends_acciones"):
+            accion["tipo_accion"] = "campana_intencion_mercado"
+        elif feat in ("pct_dias_quincena", "pct_perfil_conservador", "pct_perfil_arriesgado"):
+            accion["tipo_accion"] = "campana_timing_segmento"
+        elif "dias_habiles" in feat or "tendencia_depositos" in feat:
             accion["tipo_accion"] = "estacionalidad"
         else:
             accion["tipo_accion"] = "investigar"
         prescripcion.append(accion)
+
+    # Ordenar por z-score absoluto desc para que las más anómalas lleguen primero al slice del frontend
+    prescripcion.sort(key=lambda x: abs(x["z_score"]), reverse=True)
 
     logger.info("=== FIN Predicción: %.0f | brecha: %.0f ===", prediccion, brecha)
 
@@ -299,7 +311,7 @@ def run_prediction() -> dict[str, Any]:
         "mae_modelo": round(mae_modelo, 0) if mae_modelo else None,
         "baseline_12w": round(baseline_12w, 0),
         "brecha_vs_baseline": brecha,
-        "shap_top": shap_list[:20],
+        "shap_top": shap_display[:20],
         "contexto_historico_top_features": contexto,
         "prescripcion": prescripcion,
     }
@@ -311,7 +323,7 @@ def run_prediction() -> dict[str, Any]:
     try:
         save_prediction_result(result, semana_label=label)
     except Exception as exc:
-        logger.warning("No se pudo guardar en prediction_results: %s", exc)
+        logger.error("❌ FALLO AL GUARDAR prediction_results: %s", exc, exc_info=True)
 
     return result
 

@@ -1,0 +1,29 @@
+{
+  "feature_names": [
+    "step_09_full_account",
+    "tasa_basic_a_risk",
+    "tasa_risk_a_fulldata",
+    "tasa_fulldata_a_video",
+    "tasa_video_a_review",
+    "pct_perfil_conservador",
+    "pct_perfil_arriesgado",
+    "full_users_aprobados",
+    "TRM",
+    "sp500_cambio_semanal_pct",
+    "brent_cambio_semanal_pct",
+    "colcap_cambio_semanal_pct",
+    "spread_tes_banrep",
+    "trends_cdt",
+    "trends_acciones",
+    "pct_dias_quincena",
+    "dias_habiles_semana",
+    "dias_habiles_proyeccion",
+    "aprobados_ponderados",
+    "lag_1_target",
+    "full_users_aprobados_lag1",
+    "tendencia_aprobados_4w",
+    "tendencia_depositos_4w"
+  ],
+  "target_name": "usuarios_primer_cashin",
+  "version": 14
+}

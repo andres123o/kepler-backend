@@ -1,4 +1,4 @@
-"""
+﻿"""
 Orquestador del agente de estrategia de Kepler.
 Lee datos de Supabase + CIO + mercado → llama Claude → devuelve preview.
 """
@@ -8,11 +8,10 @@ import logging
 import re
 from typing import Any
 
-from app.services.anthropic_client import generate_strategy, generate_strategy_enriched, generate_structural_strategy
+from app.services.anthropic_client import call_basic_agent, call_premium_agent
 from app.services.customerio_fly_client import build_journey
 from app.services.supabase_client import (
     get_campaigns_cache,
-    get_funnel_context,
     get_funnel_steps,
     get_knowledge_base,
     get_latest_prediction,
@@ -21,18 +20,6 @@ from app.services.supabase_client import (
 )
 
 logger = logging.getLogger("kepler.strategy_agent")
-
-
-# ─── Helpers para leer nodes_json ────────────────────────────────────────────
-
-def _nodes_list(c: dict[str, Any]) -> list[dict]:
-    """Extrae lista de nodos de nodes_json (soporta formato dict nuevo y lista viejo)."""
-    raw = c.get("nodes_json")
-    if isinstance(raw, dict):
-        return raw.get("nodes", [])
-    if isinstance(raw, list):
-        return raw  # backward compat
-    return []
 
 
 def _get_n_nodos(c: dict[str, Any]) -> int | None:
@@ -46,11 +33,23 @@ def _get_n_nodos(c: dict[str, Any]) -> int | None:
 
 # ─── Formatters para el prompt ────────────────────────────────────────────────
 
+# Variables internas de funnel/KYC — no accionables por marketing, excluidas del agente premium
+_INTERNAL_FUNNEL_VARS: frozenset[str] = frozenset({
+    "step_09_full_account",
+    "tasa_basic_a_risk",
+    "tasa_risk_a_fulldata",
+    "tasa_fulldata_a_video",
+    "tasa_video_a_review",
+    "pct_perfil_conservador",
+    "pct_perfil_arriesgado",
+    "full_users_aprobados",
+})
+
+
 def _format_shap_analysis(prediction: dict[str, Any]) -> str:
     """
-    Formatea análisis SHAP completo desde contexto_historico_top_features.
-    Incluye las top 20 features con z-scores, valores actuales vs media 12w,
-    y contribuciones SHAP en depósitos. Clasifica en 4 grupos de urgencia.
+    Formatea análisis SHAP para el agente premium — solo variables externas/accionables.
+    Las variables internas de funnel/KYC se excluyen: no son accionables vía CIO.
     """
     full = prediction.get("full_result") or prediction
 
@@ -59,7 +58,9 @@ def _format_shap_analysis(prediction: dict[str, Any]) -> str:
     brecha     = full.get("brecha_vs_baseline", 0)
     semana     = full.get("semana_label") or full.get("semana_datos", "")
 
-    contexto: list[dict] = full.get("contexto_historico_top_features") or []
+    contexto_raw: list[dict] = full.get("contexto_historico_top_features") or []
+    # Solo variables externas — marketing no puede actuar sobre métricas internas de funnel
+    contexto = [f for f in contexto_raw if f.get("feature") not in _INTERNAL_FUNNEL_VARS]
 
     if not contexto:
         return (
@@ -136,165 +137,32 @@ def _format_shap_analysis(prediction: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def _format_campaigns_summary(
-    campaigns: list[dict[str, Any]],
-    funnel_steps: list[dict[str, Any]],
-    shap_contexto: list[dict[str, Any]] | None = None,
-) -> str:
+def _sanitize_kb_text(text: str) -> str:
     """
-    Formatea campañas mapeadas al funnel cruzadas con señales SHAP por paso.
-    Para cada paso muestra: estado campaña + métricas + señal del modelo.
+    Limpia texto libre del KB antes de enviarlo al agente.
+    Comillas dobles → simples: el carácter más común que Claude copia literal
+    al cuerpo de un email y rompe el JSON de salida.
+    Barras invertidas sueltas → / : evita secuencias de escape inválidas en JSON.
     """
-    step_map: dict[str, list[dict]] = {s["step_code"]: [] for s in funnel_steps}
-
-    unmapped_count = 0
-    for c in campaigns:
-        code = c.get("funnel_step_mapped")
-        if code and code in step_map:
-            step_map[code].append(c)
-        else:
-            unmapped_count += 1
-
-    # Mapeo SHAP por paso: match por substring del step_code en el nombre del feature
-    shap_by_step: dict[str, list[dict]] = {s["step_code"]: [] for s in funnel_steps}
-    if shap_contexto:
-        for feat in shap_contexto:
-            fname = feat["feature"]
-            for step in funnel_steps:
-                scode = step["step_code"]
-                # Extrae el número del paso (ej. "02" de "step_02_email_kyc")
-                parts = scode.split("_")
-                step_num = parts[1] if len(parts) >= 2 and parts[1].isdigit() else ""
-                if scode in fname or (step_num and f"step_{step_num}" in fname):
-                    shap_by_step[scode].append(feat)
-                    break
-
-    lines: list[str] = []
-    for step in funnel_steps:
-        code = step["step_code"]
-        name = step["step_name"]
-        step_campaigns = step_map.get(code, [])
-        step_shap = shap_by_step.get(code, [])
-
-        # Señal SHAP del paso (la feature con mayor |SHAP| entre las del paso)
-        shap_tag = ""
-        if step_shap:
-            top  = max(step_shap, key=lambda x: abs(x.get("shap_contribution", 0)))
-            z    = top.get("z_score")
-            shap = top.get("shap_contribution", 0)
-            cv   = top.get("current_value")
-            m12  = top.get("trailing_12w_mean")
-
-            if cv is not None and m12 is not None and m12 != 0:
-                pct = (cv - m12) / m12 * 100
-                direction = f"{'subió' if pct >= 0 else 'cayó'} {abs(pct):.0f}%"
-            else:
-                direction = f"z={z:+.2f}" if z is not None else "?"
-
-            impact = f"+{shap:.0f}" if shap >= 0 else f"{shap:.0f}"
-
-            if z is not None:
-                if z < -1.5:
-                    shap_tag = f" [🔴 {direction} vs media → {impact} dep]"
-                elif z >= 0.5:
-                    shap_tag = f" [🟢 {direction} vs media → {impact} dep — capitalizar]"
-                elif z < -0.5:
-                    shap_tag = f" [🟡 {direction} vs media → {impact} dep]"
-                else:
-                    shap_tag = " [⚪ estable]"
-
-        if not step_campaigns:
-            lines.append(f"{code} ({name}): GAP — sin campaña activa{shap_tag}")
-        else:
-            for c in step_campaigns:
-                status    = c.get("status", "?")
-                dr        = c.get("delivery_rate") or 0.0
-                cr        = c.get("conversion_rate") or 0.0
-                or_       = c.get("open_rate") or 0.0
-                delivered = c.get("delivered") or 0
-                weeks     = c.get("metrics_weeks_covered") or 0
-
-                cr_flag = ""
-                if delivered > 100:
-                    if cr < 0.02:
-                        cr_flag = " ⚠️CR MUY BAJO"
-                    elif cr < 0.05:
-                        cr_flag = " ↓CR bajo"
-                    elif cr >= 0.07:
-                        cr_flag = " ✓CR bueno"
-
-                metrics_str = (
-                    f" entrega={dr:.0%} open={or_:.0%} CR={cr:.1%}{cr_flag}"
-                    f" ({delivered:,} delivered, {weeks}w)"
-                ) if delivered > 0 else " (sin datos de entrega aún)"
-
-                lines.append(
-                    f"{code} ({name}): ID={c['cio_campaign_id']} '{c['name']}'"
-                    f" [{status}]{metrics_str}{shap_tag}"
-                )
-
-                # Copies actuales de los nodos — para que Claude proponga diffs específicos
-                msg_nodes = [n for n in _nodes_list(c) if n.get("type") in ("push_action", "email_action")]
-                for n in msg_nodes:
-                    is_email  = n.get("type") == "email_action"
-                    node_type = "Email" if is_email else "Push"
-                    label = n.get("name") or node_type
-                    subj  = (n.get("subject")    or "").strip()
-                    body  = (n.get("body")        or "").strip()
-                    pre   = (n.get("preheader")   or "").strip()
-
-                    def _trunc(s: str, n: int) -> str:
-                        return s[:n] + "…" if len(s) > n else s
-
-                    lines.append(f"    {label} ({node_type}):")
-                    lines.append(f"      subject:   \"{_trunc(subj, 120)}\"")
-                    if is_email and pre:
-                        lines.append(f"      preheader: \"{_trunc(pre, 120)}\"")
-                    if body:
-                        lines.append(f"      body:      \"{_trunc(body, 300)}\"")
-                    elif is_email:
-                        lines.append(f"      body:      (plantilla visual — no disponible en API)")
-
-    if unmapped_count:
-        lines.append(f"(+{unmapped_count} campañas sin mapear al funnel — ignoradas)")
-
-    return "\n".join(lines)
+    # Comillas dobles — rectas y tipográficas → comilla simple
+    text = text.replace('“', "'").replace('”', "'")  # " "
+    text = text.replace('«', "'").replace('»', "'")  # « »
+    text = text.replace('"', "'")
+    # Barras invertidas no seguidas de escape válido JSON → /
+    text = re.sub(r'\\(?!["\\/bfnrtu])', '/', text)
+    # Chars de control: tabs → espacios, CR → nada
+    text = text.replace('\t', '  ').replace('\r', '')
+    return text.strip()
 
 
 def _format_knowledge_base(kb_entries: list[dict[str, Any]]) -> str:
     lines: list[str] = []
     for entry in kb_entries:
-        lines.append(f"[{entry['tipo'].upper()}] {entry['titulo']}:\n{entry['contenido']}")
+        titulo = _sanitize_kb_text(entry['titulo'])
+        contenido = _sanitize_kb_text(entry['contenido'])
+        lines.append(f"[{entry['tipo'].upper()}] {titulo}:\n{contenido}")
     return "\n\n".join(lines)
 
-
-def _format_funnel_context(context: list[dict[str, Any]]) -> str:
-    """
-    Formatea eventos y atributos CIO para el prompt del agente.
-    El agente usa esto para saber qué trigger_event usar en cada paso
-    y qué atributos están disponibles para personalización y segmentación.
-    """
-    events = [c for c in context if c["record_type"] == "event"]
-    attributes = [c for c in context if c["record_type"] == "attribute"]
-
-    lines: list[str] = ["EVENTOS CIO POR PASO (usa estos como trigger_event y conversion_event):"]
-    by_step: dict[str, list[dict]] = {}
-    for e in events:
-        step = e.get("funnel_step_code") or "sin_paso"
-        by_step.setdefault(step, []).append(e)
-
-    for step, evs in by_step.items():
-        lines.append(f"\n  {step}:")
-        for e in evs:
-            role = e.get("event_role", "")
-            lines.append(f"    [{role}] {e['name']} — {e['description']}")
-
-    lines.append("\nATRIBUTOS CIO DISPONIBLES (para segmentación y personalización de copy):")
-    for a in attributes:
-        vals = f" | valores: {a['possible_values']}" if a.get("possible_values") else ""
-        lines.append(f"  {a['name']}: {a['description']}{vals}")
-
-    return "\n".join(lines)
 
 
 # ─── Helpers para formatear journey (fly API) ─────────────────────────────────
@@ -311,17 +179,30 @@ def _strip_html(html: str) -> str:
     return " ".join(s.split())
 
 
-def _format_journey_for_enrichment(journey: dict[str, Any]) -> str:
+def _format_journey_for_enrichment(
+    journey: dict[str, Any],
+    step_code: str | None = None,
+    step_name: str | None = None,
+) -> str:
     """
-    Convierte el output de build_journey() al texto que recibe generate_strategy_enriched().
+    Convierte el output de build_journey() al bloque de texto que reciben los agentes premium y básico.
     Incluye estructura completa del journey: delays, condiciones, A/B splits y contenido
     de mensajes (subject, preheader, body completos — sin truncar).
+
+    step_code / step_name: si se proveen (flujo básico), se añaden al encabezado para
+    que el agente pueda copiar step_code y step_name sin inventarlos.
     """
     meta  = journey["meta"]
     nodes = journey["nodes"]
 
+    header = f"## {meta['name']} | ID: {meta['id']}"
+    if step_code:
+        header += f" | Step: {step_code}"
+    if step_name:
+        header += f" | Step Name: {step_name}"
+
     lines: list[str] = [
-        f"## {meta['name']} | ID: {meta['id']}",
+        header,
         f"Trigger: {meta['trigger']}  |  Goal: {meta['goal']}  |  Estado: {meta['state']}",
         "",
     ]
@@ -606,20 +487,31 @@ def get_funnel_health() -> list[dict[str, Any]]:
             },
             "campaigns": [
                 {
-                    "cio_campaign_id":   c["cio_campaign_id"],
-                    "name":              c["name"],
-                    "status":            c.get("status"),
-                    "goal_event":        c.get("goal_event") or step.get("exit_event"),
-                    "delivery_rate":     c.get("delivery_rate") or 0.0,
-                    "open_rate":         c.get("open_rate") or 0.0,
-                    "conversion_rate":   c.get("conversion_rate") or 0.0,
-                    "delivered":         c.get("delivered") or 0,
-                    "total_sent":        c.get("total_sent") or 0,
-                    "converted":         c.get("converted") or 0,
-                    "undeliverable":     c.get("undeliverable") or 0,
+                    "cio_campaign_id":     c["cio_campaign_id"],
+                    "name":                c["name"],
+                    "status":              c.get("status"),
+                    "funnel_step_name":    step["step_name"],
+                    "funnel_step_code":    code,
+                    "goal_event":          c.get("goal_event") or step.get("exit_event"),
+                    "delivery_rate":       c.get("delivery_rate") or 0.0,
+                    "open_rate":           c.get("open_rate") or 0.0,
+                    "conversion_rate":     c.get("conversion_rate") or 0.0,
+                    "delivered":           c.get("delivered") or 0,
+                    "total_sent":          c.get("total_sent") or 0,
+                    "converted":           c.get("converted") or 0,
+                    "undeliverable":       c.get("undeliverable") or 0,
+                    "human_opened":        c.get("human_opened") or 0,
+                    "clicked":             c.get("clicked") or 0,
+                    "spike_alert":         bool(c.get("spike_alert")),
+                    "last_synced_at":      c.get("last_synced_at"),
                     "metrics_weekly_json": c.get("metrics_weekly_json"),
-                    "n_nodos":           _get_n_nodos(c),
-                    "warnings":          _camp_warnings(c),
+                    "n_nodos":             _get_n_nodos(c),
+                    "node_list":           [
+                        {"id": n.get("id"), "type": n.get("type"), "name": n.get("name") or ""}
+                        for n in ((c.get("nodes_json") or {}).get("nodes") or [])
+                        if n.get("type") in ("email_action", "push_notification_action")
+                    ],
+                    "warnings":            _camp_warnings(c),
                 }
                 for c in step_campaigns
             ],
@@ -630,295 +522,203 @@ def get_funnel_health() -> list[dict[str, Any]]:
     return result
 
 
-def generate_weekly_strategy(
-    contexto_adicional: str | None = None,
-) -> dict[str, Any]:
+def generate_premium_strategy() -> dict[str, Any]:
     """
-    Genera el preview de estrategia para la semana actual.
+    Flujo único del agente premium (campaña marcada como agent_tier='premium' en Supabase).
 
-    FASE 1 — datos resumidos → Claude identifica qué campañas necesitan trabajo
-    FASE 2 — para esas campañas: fetch template content real → Claude produce diffs específicos
+    Pasos:
+      1. SHAP + proyección desde Supabase
+      2. Campaña premium leída desde cio_campaigns_cache (NO hardcodeada)
+      3. Journey completo desde CIO fly API
+      4. Knowledge Base
+      5. Research Perplexity (sonar-pro, variables exógenas completas)
+      6. Una sola llamada Claude con PREMIUM_AGENT_SYSTEM_PROMPT
+      7. Guardar + retornar
     """
+    from app.services.perplexity_client import fetch_market_research, format_research_block
+
     logger.info("══════════════════════════════════════════════════")
-    logger.info("[ESTRATEGIA] Iniciando generación semanal")
+    logger.info("[PREMIUM] Iniciando flujo agente premium")
 
-    # ── Carga de datos ─────────────────────────────────────────────────────────
+    # 1. SHAP + proyección
     prediction = get_latest_prediction()
     if not prediction:
         raise ValueError("No hay predicción guardada. Corre primero /api/ml/predict.")
 
-    funnel_steps = get_funnel_steps()
-    campaigns    = get_campaigns_cache()
-    kb_entries   = get_knowledge_base()
-    funnel_ctx   = get_funnel_context()
-
     semana_label = prediction.get("semana_label") or prediction.get("semana_datos", "")
-    logger.info("[ESTRATEGIA] Semana: %s | Campañas en cache: %d | KB entries: %d",
-                semana_label, len(campaigns), len(kb_entries))
+    logger.info("[PREMIUM] Semana: %s", semana_label)
+    shap_text = _format_shap_analysis(prediction)
 
-    if not campaigns:
-        logger.warning("[ESTRATEGIA] Cache de campañas vacío — diagnóstico tendrá gaps. "
-                       "Corre /api/strategy/sync primero.")
+    # 2. Campaña premium desde Supabase (agent_tier='premium' — NO hardcodeado)
+    campaigns = get_campaigns_cache()
+    premium_campaign = next(
+        (c for c in campaigns if c.get("agent_tier") == "premium"),
+        None,
+    )
+    if not premium_campaign:
+        raise ValueError(
+            "No hay campaña con agent_tier='premium' en cio_campaigns_cache. "
+            "Corre: UPDATE cio_campaigns_cache SET agent_tier='premium' "
+            "WHERE funnel_step_mapped='step_09_full_account';"
+        )
 
-    full = prediction.get("full_result") or prediction
-    shap_contexto: list[dict] = full.get("contexto_historico_top_features") or []
+    cid   = str(premium_campaign["cio_campaign_id"])
+    cname = premium_campaign.get("name", cid)
+    logger.info("[PREMIUM] Campaña premium: '%s' (ID %s)", cname, cid)
 
-    shap_text       = _format_shap_analysis(prediction)
-    campaigns_text  = _format_campaigns_summary(campaigns, funnel_steps, shap_contexto)
-    kb_text         = _format_knowledge_base(kb_entries)
-    funnel_ctx_text = _format_funnel_context(funnel_ctx)
+    # 3. Journey completo desde CIO fly API
+    journey    = build_journey(cid)
+    journey_text = _format_journey_for_enrichment(journey)
+    msg_nodes  = [n for n in journey["nodes"] if n.get("type") in ("email_action", "push_action")]
+    logger.info("[PREMIUM] Journey: %d nodos totales | %d mensajes", len(journey["nodes"]), len(msg_nodes))
 
-    # ── FASE 1: Claude con datos resumidos ─────────────────────────────────────
-    logger.info("──────────────────────────────────────────────────")
-    logger.info("[FASE 1] Enviando a Claude datos resumidos de %d campaña(s)...", len(campaigns))
-    logger.info("[FASE 1] SHAP features: %d | Funnel steps: %d | Contexto adicional: %s",
-                len(shap_contexto), len(funnel_steps),
-                "sí" if contexto_adicional else "no")
+    # 4. Knowledge Base
+    kb_entries = get_knowledge_base()
+    kb_text    = _format_knowledge_base(kb_entries)
 
-    strategy = generate_strategy(
-        shap_analysis=shap_text,
-        campaigns_summary=campaigns_text,
-        knowledge_base_text=kb_text,
-        funnel_context_text=funnel_ctx_text,
+    # 5. Research Perplexity
+    logger.info("[PREMIUM] Fetching research Perplexity (sonar-pro)...")
+    research      = fetch_market_research(semana_label)
+    research_text = format_research_block(research)
+    logger.info("[PREMIUM] Research: %d chars | %d citations",
+                len(research_text), len(research.get("citations", [])))
+
+    # 6. Una sola llamada Claude con PREMIUM_AGENT_SYSTEM_PROMPT
+    logger.info("[PREMIUM] Llamando agente premium Claude...")
+    strategy = call_premium_agent(
+        shap_text=shap_text,
+        research_text=research_text,
+        kb_text=kb_text,
+        journey_text=journey_text,
         semana_label=semana_label,
-        contexto_adicional=contexto_adicional,
     )
     strategy["semana_label"] = semana_label
 
-    acciones = strategy.get("acciones", [])
-    logger.info("[FASE 1] Claude devolvió: %d acción(es) | estado_funnel=%s",
-                len(acciones), strategy.get("estado_funnel", "?"))
-    for a in acciones:
-        logger.info("[FASE 1]   → %s | %s | campaña_id=%s | tipo=%s",
-                    a.get("step_code"), a.get("prioridad"),
-                    a.get("campaña_existente_id", "nueva"), a.get("tipo_accion"))
+    # Attachar nodos_completos para el canvas del frontend
+    acciones = strategy.get("acciones") or []
+    if acciones:
+        propuesta_nodos = (acciones[0].get("propuesta") or {}).get("nodos") or []
+        if propuesta_nodos:
+            acciones[0]["nodos_completos"] = _build_nodos_completos(journey, propuesta_nodos)
 
-    # Deduplicar por campaña_existente_id — nunca dos acciones para la misma campaña
-    _seen_cids: set[str] = set()
-    acciones_dedup: list[dict] = []
-    for _a in acciones:
-        _cid = str(_a.get("campaña_existente_id") or "")
-        _key = _cid if _cid else f"nueva_{len(acciones_dedup)}"
-        if _key not in _seen_cids:
-            _seen_cids.add(_key)
-            acciones_dedup.append(_a)
-        else:
-            logger.warning("[FASE 1] Descartando acción duplicada para campaña_id=%s (bug del modelo)", _cid)
-    if len(acciones_dedup) < len(acciones):
-        logger.info("[FASE 1] Deduplicadas: %d → %d acciones", len(acciones), len(acciones_dedup))
-        strategy["acciones"] = acciones_dedup
-        acciones = acciones_dedup
-
-    # ── FASE 2: Auto-fetch del journey completo para campañas seleccionadas ────
-    # Deduplicar por cid para no desperdiciar ambos slots en la misma campaña
-    _enriquecer_seen: set[str] = set()
-    a_enriquecer: list[dict] = []
-    for _a in acciones:
-        _cid = str(_a.get("campaña_existente_id") or "")
-        if (_a.get("tipo_accion") in ("optimizar", "reforzar")
-                and _cid and _cid not in _enriquecer_seen):
-            _enriquecer_seen.add(_cid)
-            a_enriquecer.append(_a)
-            if len(a_enriquecer) >= 2:
-                break
-
-    logger.info("──────────────────────────────────────────────────")
-    if not a_enriquecer:
-        logger.info("[FASE 2] No hay campañas para enriquecer — saltando")
-    else:
-        logger.info("[FASE 2] %d campaña(s) a leer via fly API: %s",
-                    len(a_enriquecer),
-                    [a["campaña_existente_id"] for a in a_enriquecer])
-
-        enriched_parts:   list[str]        = []
-        journeys_by_cid:  dict[str, dict]  = {}
-
-        for accion in a_enriquecer:
-            cid   = str(accion["campaña_existente_id"])
-            cname = accion.get("campaña_existente_nombre", cid)
-            logger.info("[FASE 2] Leyendo journey campaña '%s' (ID %s)...", cname, cid)
-
-            try:
-                journey = build_journey(cid)
-                journeys_by_cid[cid] = journey
-                enriched_parts.append(_format_journey_for_enrichment(journey))
-                msg_nodes = [n for n in journey["nodes"]
-                             if n.get("type") in ("email_action", "push_action")]
-                logger.info("[FASE 2]   → %d nodos totales | %d mensajes leídos",
-                            len(journey["nodes"]), len(msg_nodes))
-            except Exception as exc:
-                logger.error("[FASE 2]   → Error leyendo campaña %s: %s", cid, exc)
-
-        if enriched_parts:
-            enriched_text = "\n\n".join(enriched_parts)
-            strategy = generate_strategy_enriched(
-                phase1_strategy=strategy,
-                enriched_campaigns_text=enriched_text,
-                semana_label=semana_label,
-            )
-            strategy["semana_label"] = semana_label
-
-            # Attachar nodos_completos a cada acción enriquecida para el canvas
-            for accion in strategy.get("acciones", []):
-                cid = str(accion.get("campaña_existente_id") or "")
-                if cid in journeys_by_cid:
-                    propuesta_nodos = (accion.get("propuesta") or {}).get("nodos") or []
-                    accion["nodos_completos"] = _build_nodos_completos(
-                        journeys_by_cid[cid], propuesta_nodos
-                    )
-
-            logger.info("[FASE 2] Estrategia enriquecida con journeys reales de %d campaña(s)",
-                        len(enriched_parts))
-        else:
-            logger.warning("[FASE 2] Ninguna campaña pudo leerse — usando resultado de Fase 1")
-
-    # ── Guardar resultado ──────────────────────────────────────────────────────
-    logger.info("──────────────────────────────────────────────────")
+    # 7. Guardar resultado
     try:
         save_strategy_result(strategy)
-        logger.info("[ESTRATEGIA] Resultado guardado en strategy_results")
+        logger.info("[PREMIUM] Resultado guardado en strategy_results")
     except Exception as exc:
-        logger.warning("[ESTRATEGIA] No se pudo guardar en strategy_results: %s", exc)
+        logger.error("[PREMIUM] ❌ FALLO AL GUARDAR strategy_results: %s", exc, exc_info=True)
 
-    logger.info("[ESTRATEGIA] Generación completada ✓")
+    logger.info("[PREMIUM] Flujo completado ✓")
     logger.info("══════════════════════════════════════════════════")
     return strategy
 
 
-def generate_structural_optimization(
-    phase2_strategy: dict[str, Any],
-    contexto_adicional: str | None = None,
-) -> dict[str, Any]:
+def generate_basic_strategy() -> dict[str, Any]:
     """
-    Fase 2B: analiza campañas que Phase 2 no tocó y propone optimizaciones estructurales.
-    No usa SHAP — lee el journey completo de cada campaña restante via fly API.
+    Flujo del agente básico (campañas con agent_tier='basic' en Supabase).
+
+    Pasos:
+      1. Campañas básicas desde cio_campaigns_cache (agent_tier='basic')
+      2. Journey de cada campaña desde CIO fly API
+      3. Compliance KB (tipo='compliance') — sin productos
+      4. Una sola llamada Claude con BASIC_AGENT_SYSTEM_PROMPT + fecha_hoy
+      5. Guardar + retornar
     """
+    from datetime import date
+
     logger.info("══════════════════════════════════════════════════")
-    logger.info("[FASE 2B] Iniciando optimización estructural")
+    logger.info("[BASIC] Iniciando flujo agente básico")
 
-    kb_entries   = get_knowledge_base()
-    funnel_ctx   = get_funnel_context()
+    # 1. Campañas básicas (agent_tier='basic' en Supabase)
+    campaigns = get_campaigns_cache()
+    basic_campaigns = [c for c in campaigns if c.get("agent_tier") == "basic"]
 
-    # Normalizar a str — Claude puede devolver el ID como int en JSON (sin comillas),
-    # pero Supabase lo guarda como str. Sin str(), "4626" in {4626} → False y la campaña
-    # no se excluye, apareciendo analizada dos veces.
-    phase2_ids: set[str] = {
-        str(a["campaña_existente_id"])
-        for a in phase2_strategy.get("acciones", [])
-        if a.get("campaña_existente_id") is not None
-    }
-    logger.info(
-        "[FASE 2B] Phase 2 ya actuó en %d campaña(s): %s | tipos: %s",
-        len(phase2_ids),
-        phase2_ids,
-        {type(x).__name__ for x in phase2_ids},
-    )
-
-    phase2_lines: list[str] = []
-    for a in phase2_strategy.get("acciones", []):
-        cid = a.get("campaña_existente_id", "nueva campaña")
-        phase2_lines.append(
-            f"  {a.get('step_code', '?')}: {a.get('tipo_accion', '?')} "
-            f"'{a.get('campaña_existente_nombre', cid)}' — "
-            f"{a.get('razon', '')[:120]}"
+    if not basic_campaigns:
+        raise ValueError(
+            "No hay campañas con agent_tier='basic' en cio_campaigns_cache. "
+            "Por defecto todas las campañas son 'basic' — verifica que la columna exista."
         )
-    phase2_summary = (
-        "\n".join(phase2_lines) if phase2_lines
-        else "  (Phase 2 no tuvo acciones esta semana)"
-    )
+    logger.info("[BASIC] Campañas básicas encontradas: %d", len(basic_campaigns))
 
-    health = get_funnel_health()
-    health_lines: list[str] = []
-    campanas_restantes: list[dict[str, Any]] = []  # para el auto-fetch
-
-    for step in health:
-        for c in step["campaigns"]:
-            if str(c["cio_campaign_id"]) in phase2_ids:
-                logger.debug(
-                    "[FASE 2B] Excluyendo campaña '%s' (ID %s) — ya intervenida en Modo 1",
-                    c["name"], c["cio_campaign_id"],
-                )
-                continue
-            warns = " | ".join(c.get("warnings", []))
-            n_nodos = c.get("n_nodos")
-            health_lines.append(
-                f"{step['step_code']} ({step['step_name']}): "
-                f"ID={c['cio_campaign_id']} '{c['name']}' "
-                f"estado={c.get('status', '?')} "
-                f"entrega={c['delivery_rate']:.0%} open={c['open_rate']:.0%} "
-                f"CR={c['conversion_rate']:.1%} "
-                f"({c['delivered']:,} entregados · {c['undeliverable']:,} no entregados)"
-                + (f" · {n_nodos} nodos" if n_nodos else "")
-                + (f" | ⚠ {warns}" if warns else "")
-            )
-            campanas_restantes.append(c)
-
-    health_text = (
-        "\n".join(health_lines) if health_lines
-        else "(no hay campañas fuera del alcance de Phase 2)"
-    )
-
-    # ── Auto-fetch: journey completo de cada campaña restante via fly API ────────
-    logger.info("[FASE 2B] Leyendo journeys de %d campaña(s) restantes via fly API...",
-                len(campanas_restantes))
-    journey_parts: list[str] = []
+    # 2. Journey de cada campaña básica — guardar por cid para nodos_completos después
+    journey_blocks: list[str] = []
     journeys_by_cid: dict[str, dict[str, Any]] = {}
-    for c in campanas_restantes:
-        cid   = str(c["cio_campaign_id"])
-        cname = c.get("name", cid)
+    for c in basic_campaigns:
+        cid        = str(c["cio_campaign_id"])
+        cname      = c.get("name", cid)
+        step_code  = c.get("funnel_step_mapped")
+        step_name  = c.get("funnel_step_name")
         try:
             journey = build_journey(cid)
-            journey_parts.append(_format_journey_for_enrichment(journey))
             journeys_by_cid[cid] = journey
-            msg_nodes = [n for n in journey["nodes"]
-                         if n.get("type") in ("email_action", "push_action")]
-            logger.info("[FASE 2B]   → '%s' (ID %s): %d nodos | %d mensajes",
-                        cname, cid, len(journey["nodes"]), len(msg_nodes))
-        except Exception as exc:
-            logger.error("[FASE 2B]   → Error leyendo campaña '%s' (ID %s): %s", cname, cid, exc)
-
-    detalle_campanas = "\n\n".join(journey_parts) if journey_parts else "(no se pudo leer ningún journey)"
-
-    kb_text         = _format_knowledge_base(kb_entries)
-    funnel_ctx_text = _format_funnel_context(funnel_ctx)
-
-    semana_label = phase2_strategy.get("semana_label") or phase2_strategy.get("semana_datos", "")
-    logger.info("[FASE 2B] Enviando %d campaña(s) para análisis estructural | semana=%s",
-                len(campanas_restantes), semana_label)
-
-    result = generate_structural_strategy(
-        funnel_health_text=health_text,
-        phase2_acciones_summary=phase2_summary,
-        knowledge_base_text=kb_text,
-        funnel_context_text=funnel_ctx_text,
-        detalle_campanas=detalle_campanas,
-        contexto_adicional=contexto_adicional,
-    )
-    result["semana_label"] = semana_label
-
-    # Attachar nodos_completos (con id_nodo_cio y template_id reales) para el canvas del frontend
-    for accion in result.get("acciones", []):
-        cid = str(accion.get("campaña_existente_id") or "")
-        if cid in journeys_by_cid:
-            propuesta_nodos = (accion.get("propuesta") or {}).get("nodos") or []
-            accion["nodos_completos"] = _build_nodos_completos(
-                journeys_by_cid[cid], propuesta_nodos
+            msg_count = sum(
+                1 for n in journey["nodes"]
+                if n.get("type") in ("email_action", "push_action")
             )
+            logger.info("[BASIC] Journey '%s' (ID %s): %d mensajes", cname, cid, msg_count)
+            journey_blocks.append(
+                _format_journey_for_enrichment(journey, step_code=step_code, step_name=step_name)
+            )
+        except Exception as exc:
+            logger.warning("[BASIC] No se pudo cargar journey '%s' (ID %s): %s", cname, cid, exc)
+            journey_blocks.append(f"## {cname} | ID: {cid}\n⚠ Journey no disponible: {exc}")
 
-    # Fase 2B no tiene señal SHAP — nullear para que el badge no aparezca en UI
-    for a in result.get("acciones", []):
-        a["shap_z"] = 0.0
-        a["shap_contribucion"] = None
+    journeys_text = "\n\n".join(journey_blocks)
 
+    # 3. Knowledge Base completo — productos trii + compliance
+    kb_entries = get_knowledge_base()
+    kb_text    = _format_knowledge_base(kb_entries)
+    logger.info("[BASIC] KB: %d entries activos", len(kb_entries))
+
+    # 4. Contexto de calendario (Perplexity sonar)
+    from app.services.perplexity_client import fetch_calendar_context, format_calendar_block
+
+    fecha_hoy = date.today().isoformat()
+    logger.info("[BASIC] Fetching calendar context (Perplexity sonar) | fecha=%s", fecha_hoy)
+    calendar      = fetch_calendar_context(fecha_hoy)
+    calendar_text = format_calendar_block(calendar)
+    logger.info("[BASIC] Calendario: festivos=%d | citations=%d",
+                len((calendar.get("raw_json") or {}).get("festivos_semana", [])),
+                len(calendar.get("citations", [])))
+
+    # 5. Una sola llamada Claude con BASIC_AGENT_SYSTEM_PROMPT
+    logger.info("[BASIC] Llamando agente básico Claude | fecha=%s", fecha_hoy)
+    strategy = call_basic_agent(
+        kb_text=kb_text,
+        journeys_text=journeys_text,
+        fecha_hoy=fecha_hoy,
+        calendar_text=calendar_text,
+    )
+    # Usar semana_label de la predicción (ej. "15 al 21 de junio 2026") para que el
+    # frontend pueda compararlo contra predLabel y no lo marque como estrategia vieja.
+    # Fallback a fecha_hoy si no hay predicción guardada.
+    prediction = get_latest_prediction()
+    strategy["semana_label"] = (prediction.get("semana_label") if prediction else None) or fecha_hoy
+
+    # Attachar nodos_completos para el canvas: una por acción, matcheando su journey
+    for accion in strategy.get("acciones") or []:
+        cid = str(accion.get("campaña_existente_id") or "")
+        journey = journeys_by_cid.get(cid)
+        if not journey:
+            logger.warning("[BASIC] Journey no encontrado para campaña_id=%s — sin nodos_completos", cid)
+            continue
+        propuesta_nodos = (accion.get("propuesta") or {}).get("nodos") or []
+        if propuesta_nodos:
+            accion["nodos_completos"] = _build_nodos_completos(journey, propuesta_nodos)
+            logger.info("[BASIC] nodos_completos: %d nodos para campaña_id=%s",
+                        len(accion["nodos_completos"]), cid)
+
+    # 6. Guardar resultado (estructural — distingue de premium en la DB)
     try:
-        save_structural_result(result)
-        logger.info("[FASE 2B] Resultado guardado en strategy_results (_tipo=estructural)")
+        save_structural_result(strategy)
+        logger.info("[BASIC] Resultado guardado en strategy_results (_tipo=estructural)")
     except Exception as exc:
-        logger.warning("[FASE 2B] No se pudo guardar en Supabase: %s", exc)
+        logger.error("[BASIC] ❌ FALLO AL GUARDAR strategy_results: %s", exc, exc_info=True)
 
-    logger.info("[FASE 2B] Completado — %d acción(es) estructurales", len(result.get("acciones", [])))
+    logger.info("[BASIC] Flujo completado ✓")
     logger.info("══════════════════════════════════════════════════")
-    return result
+    return strategy
+
 
 
 def execute_strategy(strategy: dict[str, Any]) -> dict[str, Any]:

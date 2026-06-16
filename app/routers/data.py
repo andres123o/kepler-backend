@@ -1,6 +1,6 @@
 from typing import Any
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
 
 from app.services.supabase_client import (
@@ -16,28 +16,27 @@ router = APIRouter()
 
 class UltimaSemanaPaylod(BaseModel):
     semana: str
-    usuarios_registro_base: int | None = None
+    # Funnel KYC
     step_09_full_account: int | None = None
     tasa_basic_a_risk: float | None = None
     tasa_risk_a_fulldata: float | None = None
     tasa_fulldata_a_video: float | None = None
     tasa_video_a_review: float | None = None
-    tasa_review_a_aprobado: float | None = None
-    tasa_registro_a_aprobado: float | None = None
-    tasa_rechazo_implicita_kyc: float | None = None
-    mediana_dias_registro_a_full: float | None = None
     pct_perfil_conservador: float | None = None
     pct_perfil_arriesgado: float | None = None
-    usuarios_primer_cashin: int | None = None
     full_users_aprobados: int | None = None
-    push_mail_delivered_pre_deposito: int | None = None
-    push_mail_converted_pre_deposito: int | None = None
-    cx_friccion_kyc: int | None = None
-    cx_bloqueos: int | None = None
-    tasa_intervencion_mensual: float | None = None
+    usuarios_primer_cashin: int | None = None
+    # Macro
     trm: float | None = None
-    variacion_colcap: float | None = None
-    intervencion_kepler: int | None = None
+    sp500_cambio_semanal_pct: float | None = None
+    brent_cambio_semanal_pct: float | None = None
+    colcap_cambio_semanal_pct: float | None = None
+    spread_tes_banrep: float | None = None
+    trends_cdt: float | None = None
+    trends_acciones: float | None = None
+    pct_dias_quincena: float | None = None
+    # Metadata
+    es_exogeno: int | None = None
 
 
 @router.get("/ultima-semana")
@@ -95,6 +94,28 @@ def nueva_proyeccion() -> dict[str, Any]:
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
     return {"ok": True, "semana_archivada": semana_archivada}
+
+
+@router.get("/auto-variables")
+def get_auto_variables(
+    semana: str = Query(..., description="Fecha de inicio de la semana (DD/MM/YYYY o YYYY-MM-DD)"),
+    banrep_tasa: float | None = Query(None, description="Tasa intervención BanRep en % (ej. 10.25). Requerida para calcular spread_tes_banrep."),
+) -> dict[str, Any]:
+    """
+    Obtiene automáticamente las variables macro para la semana dada.
+
+    Fuentes:
+      - pct_dias_quincena        : cálculo puro (~inmediato)
+      - trm                      : datos.gov.co Superfinanciera (promedio 7 días lun-dom)
+      - colcap, sp500, brent     : TradingView / yfinance (~1-3s)
+      - spread_tes_banrep        : TVC:CO10Y (TradingView) − banrep_tasa (si se provee)
+      - trends_cdt, trends_acc   : Google Trends (~35-60s — incluye pausa 30s anti-429)
+    """
+    from app.services.market_data_fetcher import fetch_auto_variables
+    try:
+        return fetch_auto_variables(semana, banrep_tasa=banrep_tasa)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
 @router.get("/master")
