@@ -34,3 +34,4 @@ json-repair>=0.28.0
 yfinance>=0.2.40
 pytrends>=4.9.2
 tradingview-scraper>=0.4.19
+holidays>=0.59

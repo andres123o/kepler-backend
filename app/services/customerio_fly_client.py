@@ -45,53 +45,43 @@ load_dotenv(Path(__file__).resolve().parent.parent.parent / ".env")
 
 logger = logging.getLogger("kepler.cio_fly")
 
-_FLY_BASE    = "https://us.fly.customer.io"
-_SA_TOKEN    = os.getenv("CIO_SA_LIVE_READONLY_KEY", "")
-_ENV_ID      = os.getenv("CIO_ENVIRONMENT_ID", "112828")
-
-# ── Validación al arranque ────────────────────────────────────────────────────
-if not _SA_TOKEN:
-    logger.warning(
-        "CIO_SA_LIVE_READONLY_KEY no configurada — "
-        "las funciones de fly.customer.io no estarán disponibles."
-    )
+_FLY_BASE = "https://us.fly.customer.io"
 
 # ── Cache del JWT en memoria ──────────────────────────────────────────────────
+# Keyed por sa_token → permite múltiples tenants con distintas keys en el mismo proceso.
 # El JWT expira (duración exacta desconocida; asumimos ~1h).
 # Renovamos proactivamente si han pasado más de 50 min.
 _JWT_TTL_SECONDS = 50 * 60  # 50 minutos
 
-_jwt_cache: dict[str, Any] = {
-    "token": "",
-    "fetched_at": 0.0,
-}
+_jwt_cache: dict[str, dict[str, Any]] = {}  # sa_token → {"token": str, "fetched_at": float}
 
 
-def _refresh_jwt() -> str:
+def _refresh_jwt(sa_token: str, force: bool = False) -> str:
     """
     Intercambia el sa_live_ por un JWT.
     Es el único POST de este módulo — va a /auth/..., no toca datos.
-    Cachea el resultado para no hacer round-trip en cada llamada.
+    Cachea por sa_token para soportar múltiples tenants.
+    force=True invalida el cache y obtiene un token nuevo.
     """
-    if not _SA_TOKEN:
+    if not sa_token:
         raise RuntimeError(
-            "CIO_SA_LIVE_READONLY_KEY no configurada en .env. "
-            "Necesaria para autenticarse en fly.customer.io."
+            "sa_token CIO no disponible. "
+            "Agrega CIO_SA_LIVE_KEY en org_secrets para esta organización."
         )
 
+    cache = _jwt_cache.setdefault(sa_token, {"token": "", "fetched_at": 0.0})
     now = time.monotonic()
-    if _jwt_cache["token"] and (now - _jwt_cache["fetched_at"]) < _JWT_TTL_SECONDS:
-        return _jwt_cache["token"]
+    if not force and cache["token"] and (now - cache["fetched_at"]) < _JWT_TTL_SECONDS:
+        return cache["token"]
 
     logger.info("CIO fly: intercambiando sa_live por JWT...")
 
     # OAuth2 client_credentials — form-encoded (NO json={})
-    # El sa_live_ actúa como client_secret en el flujo estándar OAuth2
     resp = httpx.post(
         f"{_FLY_BASE}/v1/service_accounts/oauth/token",
         data={
             "grant_type":    "client_credentials",
-            "client_secret": _SA_TOKEN,
+            "client_secret": sa_token,
         },
         headers={"Content-Type": "application/x-www-form-urlencoded"},
         timeout=15,
@@ -101,25 +91,24 @@ def _refresh_jwt() -> str:
     resp.raise_for_status()
     token = resp.json()["access_token"]
 
-    _jwt_cache["token"]      = token
-    _jwt_cache["fetched_at"] = now
+    cache["token"]      = token
+    cache["fetched_at"] = now
     logger.info("CIO fly: JWT obtenido y cacheado.")
     return token
 
 
-def _fly_get(path: str, params: dict | None = None) -> dict[str, Any]:
+def _fly_get(path: str, params: dict | None = None, sa_token: str = "") -> dict[str, Any]:
     """
-    Única función HTTP interna de este módulo.
-    Solo hace GET — si alguien modifica esto para hacer POST/PUT, el assert falla.
+    Única función HTTP GET interna de este módulo.
 
     ⚠️  NUNCA cambiar el método aquí. El JWT tiene acceso completo a CIO.
+    sa_token: clave sa_live de la organización (de org_secrets via FunnelClient).
     """
-    # Salvaguarda dura: este módulo solo hace GET sobre datos
     assert path.startswith("/v1/"), (
         f"_fly_get solo acepta rutas /v1/... — recibió: {path}"
     )
 
-    jwt = _refresh_jwt()
+    jwt = _refresh_jwt(sa_token)
     headers = {
         "Authorization": f"Bearer {jwt}",
         "Content-Type":  "application/json",
@@ -135,8 +124,7 @@ def _fly_get(path: str, params: dict | None = None) -> dict[str, Any]:
     # Si el JWT expiró, renovar y reintentar una vez
     if resp.status_code == 401:
         logger.info("CIO fly: JWT expirado, renovando...")
-        _jwt_cache["token"] = ""  # forzar refresh
-        jwt = _refresh_jwt()
+        jwt = _refresh_jwt(sa_token, force=True)
         headers["Authorization"] = f"Bearer {jwt}"
         resp = httpx.get(
             f"{_FLY_BASE}{path}",
@@ -151,18 +139,21 @@ def _fly_get(path: str, params: dict | None = None) -> dict[str, Any]:
 
 # ─── Funciones públicas — todas solo lectura ──────────────────────────────────
 
-def list_campaigns_fly(limit: int = 50) -> list[dict[str, Any]]:
+def list_campaigns_fly(fc, limit: int = 50) -> list[dict[str, Any]]:
     """
     Lista todas las campañas del workspace (paginado).
     GET /v1/environments/{env}/campaigns
+    fc: FunnelClient — lee credenciales CIO desde org_secrets.
     """
+    creds = fc.get_cio_credentials()
     all_campaigns: list[dict] = []
     page = 1
 
     while True:
         data = _fly_get(
-            f"/v1/environments/{_ENV_ID}/campaigns",
+            f"/v1/environments/{creds.environment_id}/campaigns",
             params={"limit": limit, "page": page},
+            sa_token=creds.sa_live_key,
         )
         batch = data.get("campaigns", [])
         if not batch:
@@ -170,7 +161,7 @@ def list_campaigns_fly(limit: int = 50) -> list[dict[str, Any]]:
         all_campaigns.extend(batch)
         logger.debug("CIO fly list_campaigns: página %d → %d campañas", page, len(batch))
         page += 1
-        if page > 100:  # safety cap
+        if page > 100:
             logger.warning("CIO fly list_campaigns: superó 100 páginas, deteniendo")
             break
 
@@ -178,7 +169,7 @@ def list_campaigns_fly(limit: int = 50) -> list[dict[str, Any]]:
     return all_campaigns
 
 
-def get_campaign_full(campaign_id: str | int) -> dict[str, Any]:
+def get_campaign_full(campaign_id: str | int, fc) -> dict[str, Any]:
     """
     Retorna la estructura completa de una campaña:
       - campaign   → metadatos (nombre, estado, trigger, conversion_event, conversion_window)
@@ -187,11 +178,15 @@ def get_campaign_full(campaign_id: str | int) -> dict[str, Any]:
       - edges[]    → todas las conexiones: from, to, type, index
 
     GET /v1/environments/{env}/campaigns/{id}
+    fc: FunnelClient — lee credenciales CIO desde org_secrets.
     """
-    data = _fly_get(f"/v1/environments/{_ENV_ID}/campaigns/{campaign_id}")
+    creds = fc.get_cio_credentials()
+    data = _fly_get(
+        f"/v1/environments/{creds.environment_id}/campaigns/{campaign_id}",
+        sa_token=creds.sa_live_key,
+    )
 
     actions = data.get("actions", [])
-    # Edges pueden estar top-level O dentro del objeto campaign
     edges = (
         data.get("edges")
         or data.get("campaign", {}).get("edges", [])
@@ -211,14 +206,17 @@ def get_campaign_full(campaign_id: str | int) -> dict[str, Any]:
     }
 
 
-def get_template(template_id: str | int) -> dict[str, Any]:
+def get_template(template_id: str | int, fc) -> dict[str, Any]:
     """
-    Retorna el contenido completo de un template:
-      - subject, preheader_text, body (HTML), template_type, variables[]
-
+    Retorna el contenido completo de un template.
     GET /v1/environments/{env}/templates/{id}
+    fc: FunnelClient — lee credenciales CIO desde org_secrets.
     """
-    data = _fly_get(f"/v1/environments/{_ENV_ID}/templates/{template_id}")
+    creds = fc.get_cio_credentials()
+    data = _fly_get(
+        f"/v1/environments/{creds.environment_id}/templates/{template_id}",
+        sa_token=creds.sa_live_key,
+    )
     logger.debug("CIO fly get_template: id=%s tipo=%s", template_id,
                  data.get("template", {}).get("template_type"))
     return data.get("template", data)
@@ -243,15 +241,16 @@ def decode_conditions(encoded: str) -> dict[str, Any] | None:
         return None
 
 
-def build_journey(campaign_id: str | int) -> dict[str, Any]:
+def build_journey(campaign_id: str | int, fc) -> dict[str, Any]:
     """
     Orquesta la lectura completa de una campaña:
     1. get_campaign_full → metadatos + actions + edges
     2. Para cada nodo de mensaje con template_id → get_template
     3. Decodifica conditions de nodos condicionales
     4. Ordena nodos: topological sort si hay edges, fallback por ID numérico
+    fc: FunnelClient — lee credenciales CIO desde org_secrets.
     """
-    raw = get_campaign_full(campaign_id)
+    raw = get_campaign_full(campaign_id, fc)
 
     meta_raw    = raw.get("campaign", {})
     actions_raw = raw.get("actions",  [])
@@ -274,7 +273,7 @@ def build_journey(campaign_id: str | int) -> dict[str, Any]:
 
         if node_type in ("email_action", "push_action") and a.get("template_id"):
             try:
-                tmpl = get_template(a["template_id"])
+                tmpl = get_template(a["template_id"], fc)
                 node["_subject"]      = tmpl.get("subject",        "") or a.get("subject", "")
                 node["_preheader"]     = tmpl.get("preheader_text", "")
                 node["_body"]          = tmpl.get("body",           "")

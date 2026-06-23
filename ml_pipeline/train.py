@@ -78,12 +78,13 @@ logging.basicConfig(
 logger = logging.getLogger("kepler.ml.train")
 
 
-def _next_version() -> int:
-    """Retorna la siguiente versión leyendo carpetas v* existentes en models/."""
-    if not LOCAL_MODELS_ROOT.exists():
+def _next_version(root: Path | None = None) -> int:
+    """Retorna la siguiente versión leyendo carpetas v* existentes en root (default: models/)."""
+    target = root or LOCAL_MODELS_ROOT
+    if not target.exists():
         return 1
     versions = []
-    for d in LOCAL_MODELS_ROOT.glob("v*"):
+    for d in target.glob("v*"):
         if d.is_dir() and d.name[1:].isdigit():
             versions.append(int(d.name[1:]))
     return max(versions) + 1 if versions else 1
@@ -100,7 +101,7 @@ def train_one_fold(X_train, y_train, X_test, y_test, params: dict, num_boost_rou
     return float(mean_absolute_error(y_test, pred)), model.best_iteration
 
 
-def run_training(csv_path: Path) -> dict:
+def run_training(csv_path: Path, output_dir: Path | None = None) -> dict:
     logger.info("========== INICIO ENTRENAMIENTO ==========")
     logger.info("[Fase 0] Leyendo CSV: %s", csv_path)
     data = csv_path.read_bytes()
@@ -235,8 +236,9 @@ def run_training(csv_path: Path) -> dict:
         logger.info("  %s: %.2f", feat, gain)
 
     # Guardar localmente
-    version = _next_version()
-    version_dir = LOCAL_MODELS_ROOT / f"v{version}"
+    models_root = output_dir or LOCAL_MODELS_ROOT
+    version = _next_version(models_root)
+    version_dir = models_root / f"v{version}"
     version_dir.mkdir(parents=True, exist_ok=True)
 
     meta = {"feature_names": feature_names, "target_name": TARGET_NAME, "version": version}

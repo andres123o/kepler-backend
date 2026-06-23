@@ -4,44 +4,42 @@ Validador de copy Capa 1 — determinista, sin API calls, costo $0.
 Reglas de validación para copy de nodos CIO antes del envío automático.
 Solo bloquea lo que se puede verificar mecánicamente; la proporcionalidad
 y alineación copy↔objetivo queda para el juez L2 (call_judge_agent).
+
+Las reglas vienen siempre del config JSONB del funnel (validation_rules).
+No hay defaults hardcodeados — si faltan campos en BD, las funciones lanzan ValueError.
 """
 import re
 from typing import Any
 
+# ─── Parser de rules — todo viene de la BD ───────────────────────────────────
 
-# Términos prohibidos SFC — listado conservador, solo lo que está en la ley
-_SFC_TERMS = [
-    "garantizado",
-    "sin riesgo",
-    "capital protegido",
-    "libre de riesgo",
-    "sin pérdida",
-    "ganancias aseguradas",
-    "rentabilidad garantizada",
-    "sin perder",
-    "retorno garantizado",
-]
+def _resolve_rules(rules: dict) -> dict:
+    """
+    Normaliza el dict de validation_rules del config JSONB del funnel.
+    Lanza ValueError si falta alguna clave obligatoria.
+    """
+    missing = []
+    for key in ("forbidden_sfc_terms", "market_patterns", "char_limits",
+                "revision_backend_steps", "brand_fallback_name"):
+        if key not in rules:
+            missing.append(key)
+    if missing:
+        raise ValueError(
+            f"validation_rules en el config JSONB del funnel faltan campos: {missing}. "
+            "Agrega 'validation_rules' al config en Supabase."
+        )
+    return {
+        "forbidden_terms":        rules["forbidden_sfc_terms"],
+        "market_patterns":        rules["market_patterns"],
+        "voseo_enabled":          rules.get("voseo_check", {}).get("enabled", False),
+        "voseo_pattern":          rules.get("voseo_check", {}).get("pattern", ""),
+        "char_limits":            rules["char_limits"],
+        "revision_backend_steps": set(rules["revision_backend_steps"]),
+        "brand_fallback_name":    rules["brand_fallback_name"],
+    }
 
-# Datos de mercado macro — prohibidos en campañas transaccionales de proceso
-_MARKET_PATTERNS = [
-    r"\bCOLCAP\b",
-    r"\bTRM\b",
-    r"\bS&P[\s\-]?500\b",
-    r"\bS&P\b",
-    r"\bBrent\b",
-    r"\bspread\s+TES\b",
-    r"\bBanRep\b",
-    r"\btasa\s+interbancaria\b",
-    r"\bíndice\s+bursátil\b",
-]
-_MARKET_RE = re.compile("|".join(_MARKET_PATTERNS), re.IGNORECASE)
 
-# Voseo colombiano — usar tuteo (tú/usted)
-_VOSEO_RE = re.compile(
-    r"\b(podés|tenés|invertís|abrís|empezás|hacés|querés|sabés|venís|"
-    r"entrás|completás|subís|mirás|buscás|encontrás|traés|traigás)\b",
-    re.IGNORECASE,
-)
+# ─── Constantes estructurales (invariantes entre funnels) ────────────────────
 
 # Tasas y porcentajes en el copy
 _RATE_RE = re.compile(
@@ -52,15 +50,6 @@ _RATE_RE = re.compile(
 # Liquid — aperturas y cierres de bloque
 _LIQUID_OPEN  = re.compile(r"\{%-?\s*(?:if|unless|for|case)\b")
 _LIQUID_CLOSE = re.compile(r"\{%-?\s*end(?:if|unless|for|case)\b")
-
-# Campaigns where product/rate mentions are OK (step includes 'befullusercreated')
-_REVISION_BACKEND_STEPS = {"befullusercreated", "photo_validation_completed"}
-
-# Límites de caracteres por tipo
-_CHAR_LIMITS = {
-    "email": {"subject": 50, "preheader": 85},
-    "push":  {"subject": 60, "cuerpo": 180},
-}
 
 
 def _strip_liquid(text: str) -> str:
@@ -112,9 +101,9 @@ def _max_rendered_length(text: str) -> int:
     return max((len(f.strip()) for f in fragments), default=0)
 
 
-def _is_revision_backend(campaign: dict[str, Any]) -> bool:
+def _is_revision_backend(campaign: dict[str, Any], revision_steps: set) -> bool:
     step = (campaign.get("funnel_step_mapped") or "").lower()
-    return any(code in step for code in _REVISION_BACKEND_STEPS)
+    return any(code in step for code in revision_steps)
 
 
 def _kb_rates(kb_entries: list[dict[str, Any]]) -> list[float]:
@@ -136,70 +125,35 @@ def _rate_in_kb(rate: float, kb_rates: list[float], tol: float = 0.1) -> bool:
     return any(abs(rate - kr) <= tol for kr in kb_rates)
 
 
-def extract_relevant_kb(node: dict[str, Any], kb_entries: list[dict[str, Any]]) -> str:
-    """
-    Extrae entradas de KB relevantes para este nodo (keyword match contra el copy).
-    Usado por el juez L2 — solo pasa lo que el copy menciona, no el KB completo.
-    """
-    copy_text = f"{node.get('subject', '')} {node.get('cuerpo', '')}".lower()
-
-    keyword_groups = {
-        "cdt": ["cdt", "certificado de depósito", "depósito a término"],
-        "fondo": ["fondo", "accival", "fondos de inversión", "fondo vista"],
-        "acciones": ["acciones", "bolsa", "acciones colombianas", "acciones internacionales"],
-        "cripto": ["cripto", "bitcoin", "ethereum"],
-    }
-
-    relevant: list[str] = []
-    seen: set[str] = set()
-    for entry in kb_entries:
-        titulo_lower = (entry.get("titulo") or "").lower()
-        entry_key = entry.get("titulo", "")
-        if entry_key in seen:
-            continue
-        for _, patterns in keyword_groups.items():
-            if any(p in copy_text for p in patterns) and any(p in titulo_lower for p in patterns):
-                # Recorta contenido a 300 chars para mantener el prompt del juez pequeño
-                contenido = (entry.get("contenido") or "")[:300]
-                relevant.append(f"[{entry.get('tipo', '').upper()}] {entry.get('titulo')}:\n{contenido}")
-                seen.add(entry_key)
-                break
-
-    return "\n\n".join(relevant)
-
 
 def validate_node(
     node: dict[str, Any],
     campaign: dict[str, Any],
     kb_entries: list[dict[str, Any]],
+    rules: dict,
 ) -> dict[str, Any]:
     """
     Valida un nodo de copy — Layer 1 determinista.
 
-    Args:
-        node: dict con {tipo, subject, cuerpo, preheader}
-        campaign: dict con {funnel_step_mapped, name}
-        kb_entries: lista de entradas activas del knowledge base
+    rules: dict de validation_rules desde el config JSONB del funnel (obligatorio).
 
-    Returns:
-        {passed: bool, errors: list[str], warnings: list[str]}
+    Returns: {passed: bool, errors: list[str], warnings: list[str]}
     """
-    errors: list[str] = []
+    r         = _resolve_rules(rules)
+    errors:   list[str] = []
     warnings: list[str] = []
 
     tipo      = node.get("tipo", "push")
-    subject   = node.get("subject", "") or ""
-    cuerpo    = node.get("cuerpo", "")   or ""
+    subject   = node.get("subject",   "") or ""
+    cuerpo    = node.get("cuerpo",    "") or ""
     preheader = node.get("preheader", "") or ""
+    fallback  = r["brand_fallback_name"]
 
-    all_text    = f"{subject} {preheader} {cuerpo}"
-    plain_text  = _strip_liquid(all_text)  # sin variables Liquid para reglas de texto
-
-    limits = _CHAR_LIMITS.get(tipo, {})
+    all_text   = f"{subject} {preheader} {cuerpo}"
+    plain_text = _strip_liquid(all_text)
+    limits     = r["char_limits"].get(tipo, {})
 
     # ── 1. Límites de caracteres ────────────────────────────────────────────────
-    # Usar _max_rendered_length: mide la rama más larga del Liquid, no el template crudo.
-    # Un subject con {% if perfil %}...{% elsif %}...{% endif %} se mide por su rama más larga.
     subj_len = _max_rendered_length(subject)
     if limits.get("subject") and subj_len > limits["subject"]:
         errors.append(
@@ -218,11 +172,11 @@ def validate_node(
                 f"Cuerpo push demasiado largo: ~{cuerpo_len} chars renderizados (máximo {limits['cuerpo']})"
             )
 
-    # ── 2. Términos SFC prohibidos ──────────────────────────────────────────────
+    # ── 2. Términos prohibidos (regulador) ─────────────────────────────────────
     plain_lower = plain_text.lower()
-    for term in _SFC_TERMS:
-        if term in plain_lower:
-            errors.append(f"Término SFC prohibido detectado: '{term}'")
+    for term in r["forbidden_terms"]:
+        if term.lower() in plain_lower:
+            errors.append(f"Término regulatorio prohibido detectado: '{term}'")
 
     # ── 3. Liquid desbalanceado ─────────────────────────────────────────────────
     opens  = len(_LIQUID_OPEN.findall(all_text))
@@ -232,28 +186,31 @@ def validate_node(
             f"Liquid desbalanceado: {opens} apertura(s) vs {closes} cierre(s) — revisá los bloques if/endif"
         )
 
-    # ── 4. Voseo ───────────────────────────────────────────────────────────────
-    m_voseo = _VOSEO_RE.search(plain_text)
-    if m_voseo:
-        errors.append(
-            f"Voseo detectado: '{m_voseo.group(0)}' — trii usa tuteo (tú/usted), no voseo"
-        )
+    # ── 4. Voseo / idioma ──────────────────────────────────────────────────────
+    if r["voseo_enabled"]:
+        voseo_re = re.compile(r["voseo_pattern"], re.IGNORECASE)
+        m_voseo  = voseo_re.search(plain_text)
+        if m_voseo:
+            errors.append(
+                f"Conjugación no permitida: '{m_voseo.group(0)}' — usar tuteo, no voseo"
+            )
 
     # ── 5. first_name sin wrapper (email) ─────────────────────────────────────
     if tipo == "email" and "{{customer.first_name}}" in all_text:
         if "{% if customer.first_name %}" not in all_text:
             errors.append(
-                "{{customer.first_name}} sin wrapper — puede quedar vacío en usuarios sin nombre. "
-                "Envolver con: {% if customer.first_name %}{{ customer.first_name }}{% else %}triier{% endif %}"
+                f"{{{{customer.first_name}}}} sin wrapper — puede quedar vacío en usuarios sin nombre. "
+                f"Envolver con: {{% if customer.first_name %}}{{{{ customer.first_name }}}}{{% else %}}{fallback}{{% endif %}}"
             )
 
     # ── 6. Market data en campaña transaccional ────────────────────────────────
-    if not _is_revision_backend(campaign):
-        m_market = _MARKET_RE.search(plain_text)
+    if not _is_revision_backend(campaign, r["revision_backend_steps"]):
+        market_re = re.compile("|".join(r["market_patterns"]), re.IGNORECASE)
+        m_market  = market_re.search(plain_text)
         if m_market:
             errors.append(
                 f"Dato de mercado '{m_market.group(0)}' en campaña de proceso — "
-                "solo permitido en Revisión Backend"
+                "solo permitido en el paso de revisión backend"
             )
 
     # ── 7. Tasas no en Knowledge Base ──────────────────────────────────────────
@@ -283,33 +240,57 @@ def validate_node(
 def validate_node_premium(
     node: dict[str, Any],
     kb_entries: list[dict[str, Any]],
+    rules: dict,
 ) -> dict[str, Any]:
     """
     Valida un nodo del agente premium — Layer 1 determinista.
 
-    Igual que validate_node EXCEPTO que el dato de mercado (COLCAP, TRM, S&P,
-    Brent, spread TES) es VÁLIDO y esperado en los nodos premium — es el contexto
-    que el agente SHAP + Perplexity inyecta intencionalmente en el copy.
+    Igual que validate_node EXCEPTO que market data es VÁLIDO (es el contexto
+    que el agente SHAP + Perplexity inyecta intencionalmente).
 
-    Reglas activas: chars, SFC, Liquid balance, voseo, first_name wrapper, KB rates.
-    Regla desactivada: market data (no aplica para premium).
+    rules: dict de validation_rules desde config JSONB del funnel (obligatorio).
+
+    Reglas activas: chars, forbidden_terms, Liquid balance, voseo, first_name wrapper, KB rates.
+    Regla desactivada: market data.
     """
-    errors: list[str] = []
+    r         = _resolve_rules(rules)
+    errors:   list[str] = []
     warnings: list[str] = []
 
     tipo      = node.get("tipo", "push")
-    subject   = node.get("subject", "") or ""
-    cuerpo    = node.get("cuerpo", "")   or ""
+    subject   = node.get("subject",   "") or ""
+    cuerpo    = node.get("cuerpo",    "") or ""
     preheader = node.get("preheader", "") or ""
+    fallback  = r["brand_fallback_name"]
 
     all_text   = f"{subject} {preheader} {cuerpo}"
     plain_text = _strip_liquid(all_text)
+    limits     = r["char_limits"].get(tipo, {})
 
-    # ── 1. Términos SFC prohibidos ──────────────────────────────────────────────
+    # ── 1. Límites de caracteres ────────────────────────────────────────────────
+    subj_len = _max_rendered_length(subject)
+    if limits.get("subject") and subj_len > limits["subject"]:
+        errors.append(
+            f"Subject demasiado largo: ~{subj_len} chars renderizados (máximo {limits['subject']})"
+        )
+    if limits.get("preheader") and preheader:
+        pre_len = _max_rendered_length(preheader)
+        if pre_len > limits["preheader"]:
+            errors.append(
+                f"Preheader demasiado largo: ~{pre_len} chars renderizados (máximo {limits['preheader']})"
+            )
+    if tipo == "push" and limits.get("cuerpo"):
+        cuerpo_len = _max_rendered_length(cuerpo)
+        if cuerpo_len > limits["cuerpo"]:
+            errors.append(
+                f"Cuerpo push demasiado largo: ~{cuerpo_len} chars renderizados (máximo {limits['cuerpo']})"
+            )
+
+    # ── 2. Términos prohibidos (regulador) ─────────────────────────────────────
     plain_lower = plain_text.lower()
-    for term in _SFC_TERMS:
-        if term in plain_lower:
-            errors.append(f"Término SFC prohibido detectado: '{term}'")
+    for term in r["forbidden_terms"]:
+        if term.lower() in plain_lower:
+            errors.append(f"Término regulatorio prohibido detectado: '{term}'")
 
     # ── 3. Liquid desbalanceado ─────────────────────────────────────────────────
     opens  = len(_LIQUID_OPEN.findall(all_text))
@@ -319,34 +300,34 @@ def validate_node_premium(
             f"Liquid desbalanceado: {opens} apertura(s) vs {closes} cierre(s) — revisá los bloques if/endif"
         )
 
-    # ── 4. Voseo ───────────────────────────────────────────────────────────────
-    m_voseo = _VOSEO_RE.search(plain_text)
-    if m_voseo:
-        errors.append(
-            f"Voseo detectado: '{m_voseo.group(0)}' — trii usa tuteo (tú/usted), no voseo"
-        )
+    # ── 4. Voseo / idioma ──────────────────────────────────────────────────────
+    if r["voseo_enabled"]:
+        voseo_re = re.compile(r["voseo_pattern"], re.IGNORECASE)
+        m_voseo  = voseo_re.search(plain_text)
+        if m_voseo:
+            errors.append(
+                f"Conjugación no permitida: '{m_voseo.group(0)}' — usar tuteo, no voseo"
+            )
 
     # ── 5. first_name sin wrapper (email) ─────────────────────────────────────
     if tipo == "email" and "{{customer.first_name}}" in all_text:
         if "{% if customer.first_name %}" not in all_text:
             errors.append(
-                "{{customer.first_name}} sin wrapper — puede quedar vacío en usuarios sin nombre. "
-                "Envolver con: {% if customer.first_name %}{{ customer.first_name }}{% else %}triier{% endif %}"
+                f"{{{{customer.first_name}}}} sin wrapper — puede quedar vacío en usuarios sin nombre. "
+                f"Envolver con: {{% if customer.first_name %}}{{{{ customer.first_name }}}}{{% else %}}{fallback}{{% endif %}}"
             )
 
     # ── 6. Market data — NO SE VALIDA en premium (es el contexto esperado) ──────
 
-    # ── 7. Tasas de producto no en Knowledge Base ──────────────────────────────
-    # Solo verifica tasas de producto (CDT %, fondos). Las cifras de mercado
-    # (TRM, spread TES, variación COLCAP) no se buscan en el KB.
+    # ── 7. Tasas de producto no en KB ──────────────────────────────────────────
+    # Solo verifica tasas de producto (< 100%). Las cifras macro (TRM ~4000,
+    # COLCAP ~1800, etc.) se excluyen porque son datos de mercado esperados en premium.
     kb_rate_list = _kb_rates(kb_entries)
     for m_rate in _RATE_RE.finditer(plain_text):
         try:
             rate_num = float(m_rate.group(1).replace(",", "."))
         except ValueError:
             continue
-        # Cifras de mercado típicas (TRM ~4000, COLCAP ~1800, S&P >1000):
-        # solo verificar tasas de rendimiento plausibles (< 100 = porcentaje)
         if rate_num >= 100:
             continue
         if not _rate_in_kb(rate_num, kb_rate_list):

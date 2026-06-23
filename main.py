@@ -25,7 +25,7 @@ app.add_middleware(
     allow_origins=_origins,
     allow_credentials=True,
     allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-    allow_headers=["Content-Type", "Authorization"],
+    allow_headers=["Content-Type", "Authorization", "X-Org-Slug", "X-Funnel-Slug"],
 )
 
 app.include_router(data.router,     prefix="/api/data",     tags=["data"])

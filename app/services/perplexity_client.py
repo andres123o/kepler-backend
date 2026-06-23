@@ -1,8 +1,11 @@
 """
-Cliente Perplexity — dos endpoints distintos por agente.
+Cliente Perplexity — dos endpoints por agente.
 
-Básico   → POST /search        (Search API)    : snippets web para contexto de calendario.
-Premium  → POST /v1/responses  (Responses API) : síntesis de research de mercado financiero.
+Premium → POST /v1/responses (Responses API, sonar-pro): research de mercado.
+Basico  → POST /v1/responses (Responses API, sonar):     contexto de calendario.
+
+Query, system prompt y parametros API se cargan desde funnel_prompts en Supabase.
+fc (FunnelClient) es requerido — no hay fallback hardcodeado.
 
 API key: PERPLEXITY_API_KEY (.env).
 """
@@ -16,13 +19,10 @@ from typing import Any
 import requests
 from dotenv import load_dotenv
 
-from app.services.prompts.premium.perplexity_query import build_market_query
-
 load_dotenv(Path(__file__).resolve().parent.parent.parent / ".env")
 logger = logging.getLogger("kepler.perplexity")
 
-_SEARCH_URL    = "https://api.perplexity.ai/search"
-_RESPONSES_URL = "https://api.perplexity.ai/v1/responses"
+_CHAT_URL = "https://api.perplexity.ai/chat/completions"
 
 
 def _headers() -> dict:
@@ -41,63 +41,68 @@ def _api_key() -> str:
 # BÁSICO → /search
 # ─────────────────────────────────────────────────────────────
 
-def _build_calendar_search_query(fecha_hoy: str) -> str:
-    """Query concisa para el Search API — busca hechos de calendario colombiano."""
-    return (
-        f"festivos Colombia próximos 7 días desde {fecha_hoy} "
-        "quincena prima legal servicios BanRep reunión política monetaria "
-        "eventos electorales vencimientos tributarios DIAN"
-    )
-
-
-def fetch_calendar_context(fecha_hoy: str) -> dict[str, Any]:
+def fetch_calendar_context(fecha_hoy: str, fc) -> dict[str, Any]:
     """
-    Básico → POST /search
+    Basico → POST /v1/responses (Responses API, sonar)
 
-    Devuelve snippets de resultados web sobre el calendario colombiano
-    para la semana en curso.
+    Query, system prompt y api_params se leen desde funnel_prompts en Supabase.
+    fc es requerido — no hay fallback hardcodeado.
 
     Retorna:
       {"raw_text": str | None, "citations": list[str]}
     """
     key = _api_key()
     if not key:
-        logger.warning("[PERPLEXITY/search] PERPLEXITY_API_KEY no configurada — calendario omitido")
+        logger.warning("[PERPLEXITY/basic] PERPLEXITY_API_KEY no configurada — calendario omitido")
         return {"raw_text": None, "citations": []}
 
+    system_prompt = fc.get_agent_prompt("basic", "perplexity_system")
+    query         = fc.get_agent_prompt("basic", "perplexity_query")
+    base_params   = fc.get_perplexity_api_params("basic")
+
+    if not system_prompt or not query or not base_params:
+        raise RuntimeError(
+            "funnel_prompts no tiene filas para basic/perplexity_system, "
+            "basic/perplexity_query o basic/perplexity_query(api_params). "
+            "Corre seed_prompts.py para este funnel."
+        )
+
+    import re as _re
+    query = _re.sub(r'Fecha de hoy:[^\n]*', f'Fecha de hoy: {fecha_hoy}.', query)
+
     payload = {
-        "query":              _build_calendar_search_query(fecha_hoy),
-        "max_results":        5,
-        "max_tokens_per_page": 512,
+        **base_params,
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user",   "content": query},
+        ],
     }
 
-    logger.info("[PERPLEXITY/search] Fetching calendar | fecha=%s", fecha_hoy)
+    logger.info("[PERPLEXITY/basic] Fetching calendar context | fecha=%s", fecha_hoy)
 
     try:
-        resp = requests.post(_SEARCH_URL, json=payload, headers=_headers(), timeout=30)
+        resp = requests.post(_CHAT_URL, json=payload, headers=_headers(), timeout=45)
         resp.raise_for_status()
         data = resp.json()
     except requests.exceptions.Timeout:
-        logger.error("[PERPLEXITY/search] Timeout (30s) — calendario omitido")
+        logger.error("[PERPLEXITY/basic] Timeout — calendario omitido")
         return {"raw_text": None, "citations": []}
     except requests.exceptions.RequestException as exc:
-        logger.error("[PERPLEXITY/search] Error: %s — calendario omitido", exc)
+        logger.error("[PERPLEXITY/basic] Error: %s — calendario omitido", exc)
         return {"raw_text": None, "citations": []}
 
-    results   = data.get("results", [])
-    citations = [r.get("url", "") for r in results if r.get("url")]
+    raw_text  = None
+    citations = []
+    choices   = data.get("choices") or []
+    if choices:
+        raw_text = (choices[0].get("message") or {}).get("content")
+    citations = data.get("citations") or []
 
-    snippets = []
-    for r in results:
-        title = r.get("title", "")
-        text  = r.get("text") or r.get("snippet") or r.get("content", "")
-        url   = r.get("url", "")
-        if text:
-            snippets.append(f"[{title}]({url})\n{text.strip()}")
-
-    raw_text = "\n\n---\n\n".join(snippets) if snippets else None
-
-    logger.info("[PERPLEXITY/search] Resultados: %d | citations: %d", len(results), len(citations))
+    if raw_text:
+        logger.info("[PERPLEXITY/basic] Recibido | chars=%d | citations=%d",
+                    len(raw_text), len(citations))
+    else:
+        logger.error("[PERPLEXITY/basic] Respuesta sin texto: %s", str(data)[:400])
     return {"raw_text": raw_text, "citations": citations}
 
 
@@ -107,63 +112,95 @@ def fetch_calendar_context(fecha_hoy: str) -> dict[str, Any]:
 
 def fetch_market_research(
     semana_label: str,
-    fecha_hoy: date | None = None,  # mantenido por compatibilidad, no usado en este endpoint
+    fecha_hoy: date | None = None,
+    fc=None,
 ) -> dict[str, Any]:
     """
-    Premium → POST /v1/responses (preset: fast-search)
+    Premium → POST /v1/responses (Responses API, sonar-pro)
 
-    Síntesis de research de mercado financiero colombiano: COLCAP, TRM,
-    BanRep, noticias CO, sentimiento retail.
+    Query, system prompt y api_params se leen desde funnel_prompts en Supabase.
+    fc es requerido — no hay fallback hardcodeado.
 
     Retorna:
       {"raw_text": str | None, "citations": list[str]}
     """
     key = _api_key()
     if not key:
-        logger.warning("[PERPLEXITY/responses] PERPLEXITY_API_KEY no configurada — research omitido")
+        logger.warning("[PERPLEXITY/premium] PERPLEXITY_API_KEY no configurada — research omitido")
         return {"raw_text": None, "citations": []}
 
+    if fc is None:
+        raise RuntimeError(
+            "fetch_market_research requiere fc (FunnelClient). "
+            "Pasa el FunnelClient desde generate_premium_strategy."
+        )
+
+    system_prompt = fc.get_agent_prompt("premium", "perplexity_system")
+    query         = fc.get_agent_prompt("premium", "perplexity_query")
+    base_params   = fc.get_perplexity_api_params("premium")
+
+    if not system_prompt or not query or not base_params:
+        raise RuntimeError(
+            "funnel_prompts no tiene filas para premium/perplexity_system, "
+            "premium/perplexity_query o premium/perplexity_query(api_params). "
+            "Corre seed_prompts.py para este funnel."
+        )
+
+    import re as _re
+    _fecha_hoy = fecha_hoy or date.today()
+    _today_str = _fecha_hoy.strftime("%Y-%m-%d")
+    query = _re.sub(r'Fecha de hoy:[^\n]*', f'Fecha de hoy: {_today_str}.', query)
+
     payload = {
-        "preset": "fast-search",
-        "input":  build_market_query(semana_label),
+        **base_params,
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user",   "content": query},
+        ],
     }
 
-    logger.info("[PERPLEXITY/responses] Fetching market research | semana=%s", semana_label)
+    _model      = base_params.get("model", "?")
+    _dom_filter = base_params.get("search_domain_filter")
+    _recency    = base_params.get("search_recency_filter", "none")
+    logger.info(
+        "[PERPLEXITY/premium] REQUEST | semana=%s | fecha=%s | model=%s | recency=%s | domain_filter=%s",
+        semana_label, _today_str, _model, _recency,
+        f"{len(_dom_filter)} dominios" if _dom_filter else "SIN FILTRO (toda la web)",
+    )
+    logger.info("[PERPLEXITY/premium] QUERY (primeros 200 chars): %s", query[:200])
 
     try:
-        resp = requests.post(_RESPONSES_URL, json=payload, headers=_headers(), timeout=60)
+        resp = requests.post(_CHAT_URL, json=payload, headers=_headers(), timeout=60)
         resp.raise_for_status()
         data = resp.json()
     except requests.exceptions.Timeout:
-        logger.error("[PERPLEXITY/responses] Timeout (60s) — research omitido")
+        logger.error("[PERPLEXITY/premium] Timeout (60s) — research omitido")
         return {"raw_text": None, "citations": []}
     except requests.exceptions.RequestException as exc:
-        logger.error("[PERPLEXITY/responses] Error: %s — research omitido", exc)
+        logger.error("[PERPLEXITY/premium] Error HTTP %s: %s — research omitido",
+                     getattr(exc.response, "status_code", "?"), exc)
         return {"raw_text": None, "citations": []}
 
-    # Estructura real de /v1/responses:
-    #   output[0] → type="search_results" → results[].url  (citations)
-    #   output[1] → type="message"        → content[0].text (texto sintetizado)
     raw_text  = None
     citations = []
-
-    for item in data.get("output", []):
-        if item.get("type") == "search_results":
-            for r in item.get("results", []):
-                url = r.get("url", "")
-                if url:
-                    citations.append(url)
-        elif item.get("type") == "message":
-            for block in item.get("content", []):
-                if block.get("type") == "output_text":
-                    raw_text = block.get("text")
-                    break
+    choices   = data.get("choices") or []
+    if choices:
+        raw_text = (choices[0].get("message") or {}).get("content")
+    citations = data.get("citations") or []
 
     if raw_text:
-        logger.info("[PERPLEXITY/responses] Research recibido | chars=%d | citations=%d",
-                    len(raw_text), len(citations))
+        logger.info(
+            "[PERPLEXITY/premium] RESPONSE OK | chars=%d | citations=%d | primeras_urls=%s",
+            len(raw_text), len(citations),
+            citations[:3] if citations else "ninguna — respuesta SIN búsqueda real",
+        )
+        if not citations:
+            logger.warning(
+                "[PERPLEXITY/premium] 0 citaciones — el modelo respondió sin hacer búsqueda web. "
+                "Verifica que el modelo '%s' sea un modelo online de Perplexity.", _model,
+            )
     else:
-        logger.error("[PERPLEXITY/responses] Respuesta sin texto reconocible: %s", str(data)[:400])
+        logger.error("[PERPLEXITY/premium] Respuesta sin texto reconocible: %s", str(data)[:400])
 
     return {"raw_text": raw_text, "citations": citations}
 
@@ -181,7 +218,7 @@ def format_calendar_block(calendar: dict[str, Any]) -> str:
         return (
             "(No hay contexto de calendario disponible esta semana — "
             "Perplexity no respondió o la API key no está configurada. "
-            "Deriva el contexto solo desde la fecha usando tu conocimiento del calendario colombiano.)"
+            "Deriva el contexto desde la fecha de hoy usando tu conocimiento del calendario del país correspondiente.)"
         )
 
     lines = [raw_text]

@@ -31,8 +31,6 @@ except ImportError:
 import anthropic
 from dotenv import load_dotenv
 
-from app.services.prompts.premium import PREMIUM_AGENT_SYSTEM_PROMPT
-from app.services.prompts.tier_basic import BASIC_AGENT_SYSTEM_PROMPT
 
 load_dotenv(Path(__file__).resolve().parent.parent.parent / ".env")
 
@@ -104,43 +102,32 @@ def call_premium_agent(
     kb_text: str,
     journey_text: str,
     semana_label: str,
+    system_prompt: str,
+    kb_preamble: str,
+    user_template: str,
 ) -> dict[str, Any]:
     """
-    Agente premium — una sola llamada Claude con PREMIUM_AGENT_SYSTEM_PROMPT.
+    Agente premium — una sola llamada Claude.
 
-    Recibe los 4 bloques definidos en agente_premium.py:
-      1. PROYECCIÓN Y SHAP  (dinámico)
-      2. RESEARCH DE MERCADO (Perplexity, dinámico)
-      3. KNOWLEDGE BASE Y COMPLIANCE (cacheado)
-      4. JOURNEY ACTUAL CIO (dinámico)
+    system_prompt, kb_preamble, user_template: cargados desde funnel_prompts en Supabase.
+    user_template usa placeholders: {semana_label}, {shap_text}, {research_text}, {journey_text}.
     """
-    model  = _get_model()
-    client = _get_client()
+    model    = _get_model()
+    client   = _get_client()
 
-    # Bloque 3 — KB cacheado (cambia raro entre semanas)
     kb_block: dict[str, Any] = {
         "type": "text",
-        "text": (
-            "── BLOQUE 3: KNOWLEDGE BASE — PRODUCTOS DISPONIBLES EN TRII ──\n"
-            "!IMPORTANT: Todo lo que aparece a continuación son PRODUCTOS PROPIOS DE TRII. "
-            "Aunque la información incluye emisores, tasas y condiciones detalladas, todos estos "
-            "instrumentos están disponibles y se comercializan directamente en trii. "
-            "Refiérete a ellos siempre como 'en trii' o 'de trii', nunca como productos de bancos "
-            "externos, competidores o del mercado genérico.\n\n"
-            f"{kb_text}"
-        ),
+        "text": f"{kb_preamble}\n\n{kb_text}",
         "cache_control": {"type": "ephemeral"},
     }
 
-    # Bloques dinámicos — sin caché (cambian cada semana)
     data_block: dict[str, Any] = {
         "type": "text",
-        "text": (
-            f"SEMANA: {semana_label}\n\n"
-            f"── BLOQUE 1: PROYECCIÓN Y SHAP ──\n{shap_text}\n\n"
-            f"── BLOQUE 2: RESEARCH DE MERCADO (Perplexity sonar-pro) ──\n{research_text}\n\n"
-            f"── BLOQUE 4: JOURNEY ACTUAL CIO ──\n{journey_text}\n\n"
-            "Responde SOLO JSON válido."
+        "text": user_template.format(
+            semana_label=semana_label,
+            shap_text=shap_text,
+            research_text=research_text,
+            journey_text=journey_text,
         ),
     }
 
@@ -151,7 +138,7 @@ def call_premium_agent(
         max_tokens=16000,
         system=[{
             "type": "text",
-            "text": PREMIUM_AGENT_SYSTEM_PROMPT,
+            "text": system_prompt,
             "cache_control": {"type": "ephemeral"},
         }],
         messages=[{"role": "user", "content": [kb_block, data_block]}],
@@ -171,43 +158,35 @@ def call_basic_agent(
     journeys_text: str,
     fecha_hoy: str,
     calendar_text: str,
+    system_prompt: str,
+    kb_preamble: str,
+    user_template: str,
 ) -> dict[str, Any]:
     """
-    Agente básico — una sola llamada Claude con BASIC_AGENT_SYSTEM_PROMPT.
+    Agente basico — una sola llamada Claude.
 
-    Recibe tres bloques:
-      1. KNOWLEDGE BASE             (cacheado — cambia raro)
-      2. FECHA + CONTEXTO CALENDARIO (Perplexity sonar, dinámico)
-      3. JOURNEYS CIO               (dinámico — 5 campañas básicas)
+    system_prompt, kb_preamble, user_template: cargados desde funnel_prompts en Supabase.
+    user_template usa placeholders: {fecha_hoy}, {calendar_text}, {journeys_text}.
     """
     model  = _get_model()
     client = _get_client()
 
-    # Bloque cacheado — KB completo (cambia raro)
     kb_block: dict[str, Any] = {
         "type": "text",
-        "text": (
-            "── KNOWLEDGE BASE — PRODUCTOS DISPONIBLES EN TRII ──\n"
-            "!IMPORTANT: Todo lo que aparece a continuación son PRODUCTOS PROPIOS DE TRII. "
-            "Aunque incluye emisores, tasas y condiciones detalladas, todos están disponibles "
-            "directamente en trii. Para copy de Revisión Backend puedes referenciarlos. "
-            "Para el resto de campañas transaccionales, úsalos solo como contexto de compliance "
-            "y voz de marca — no como argumento de venta.\n\n"
-            f"{kb_text}"
-        ),
+        "text": f"{kb_preamble}\n\n{kb_text}",
         "cache_control": {"type": "ephemeral"},
     }
 
-    # Bloque dinámico — fecha + calendario + journeys (cambia cada llamada)
     data_block: dict[str, Any] = {
         "type": "text",
-        "text": (
-            f"FECHA DE HOY: {_fecha_legible(fecha_hoy)}\n\n"
-            f"── CONTEXTO DE CALENDARIO (Perplexity sonar) ──\n{calendar_text}\n\n"
-            f"── JOURNEYS DE LAS CAMPAÑAS BÁSICAS ──\n{journeys_text}\n\n"
-            "Responde SOLO JSON válido."
+        "text": user_template.format(
+            fecha_hoy=_fecha_legible(fecha_hoy),
+            calendar_text=calendar_text,
+            journeys_text=journeys_text,
         ),
     }
+
+    system_prompt_with_date = system_prompt.replace("{fecha_hoy}", _fecha_legible(fecha_hoy))
 
     logger.info("[BASIC] Claude %s — agente básico | fecha=%s", model, fecha_hoy)
 
@@ -216,7 +195,7 @@ def call_basic_agent(
         max_tokens=16000,
         system=[{
             "type": "text",
-            "text": BASIC_AGENT_SYSTEM_PROMPT,
+            "text": system_prompt_with_date,
             "cache_control": {"type": "ephemeral"},
         }],
         messages=[{"role": "user", "content": [kb_block, data_block]}],
@@ -235,6 +214,7 @@ def call_judge_agent(
     node: dict[str, Any],
     campaign: dict[str, Any],
     kb_excerpt: str,
+    company_description: str = "",
 ) -> dict[str, Any]:
     """
     Layer 2 — LLM-as-Judge. Solo se llama si L1 pasó.
@@ -264,7 +244,7 @@ def call_judge_agent(
         return {"aprobado": True, "razon": "Sin KB relevante — no hay cifras que verificar", "confianza": 1.0}
 
     prompt = (
-        f"Eres un auditor de precisión numérica para trii (fintech colombiana).\n\n"
+        f"Eres un auditor de precisión numérica{' para ' + company_description if company_description else ''}.\n\n"
         f"TAREA: Verificar que todas las cifras, tasas y montos mencionados en el copy "
         f"coincidan exactamente con los valores del Knowledge Base. "
         f"Solo rechazás si hay una cifra en el copy que CONTRADICE el KB.\n\n"
@@ -304,6 +284,7 @@ def call_judge_agent(
 def call_judge_agent_premium(
     node: dict[str, Any],
     kb_full: str,
+    company_description: str = "",
 ) -> dict[str, Any]:
     """
     Layer 2 — LLM-as-Judge exclusivo para agente premium.
@@ -329,9 +310,11 @@ def call_judge_agent_premium(
     preheader_line = f"Preheader: {preheader}\n" if preheader else ""
 
     prompt = (
-        f"Eres un auditor numérico para trii. Sigue estos pasos en orden:\n\n"
-        f"PASO 1 — Extrae del copy todas las cifras de PRODUCTO (tasas % EA/NMV y montos mínimos COP).\n"
-        f"  Ignora: TRM, COLCAP, S&P, Brent, spread TES, BanRep, Fogafin, rentabilidades históricas.\n\n"
+        f"Eres un auditor numérico{' para ' + company_description if company_description else ''}. Sigue estos pasos en orden:\n\n"
+        f"PASO 1 — Extrae del copy todas las cifras de PRODUCTO propias del catálogo: "
+        f"tasas de rendimiento, comisiones, montos mínimos, plazos de inversión. "
+        f"NO son cifras de producto: índices bursátiles, tipos de cambio, tasas del banco central, "
+        f"rentabilidades históricas de mercado — ignóralas aunque aparezcan en el copy.\n\n"
         f"PASO 2 — Para cada cifra de producto, búscala en el KB (tolerancia ±0.1%).\n"
         f"  - Si coincide → marca ✓\n"
         f"  - Si no coincide o no está en el KB → marca ✗ y anota cuál\n\n"

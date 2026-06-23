@@ -1,21 +1,17 @@
 from typing import Any
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 
 from app.services.ml_runner import get_training_status, run_prediction, run_training
-from app.services.supabase_client import get_latest_prediction, get_prediction_history
+from app.services.supabase_client import FunnelClient, get_funnel_client
 
 router = APIRouter()
 
 
 @router.post("/predict")
-def predict() -> dict[str, Any]:
-    """
-    Lee ultima_semana + master desde Supabase, corre el pipeline completo
-    y devuelve predicción + SHAP + contexto + prescripción.
-    """
+def predict(fc: FunnelClient = Depends(get_funnel_client)) -> dict[str, Any]:
     try:
-        result = run_prediction()
+        result = run_prediction(fc)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except Exception as exc:
@@ -24,13 +20,9 @@ def predict() -> dict[str, Any]:
 
 
 @router.post("/train")
-def train() -> dict[str, Any]:
-    """
-    Descarga master_consolidado_final de Supabase y reentrena el modelo XGBoost.
-    Puede tardar varios minutos — no usar en Vercel serverless con timeout corto.
-    """
+def train(fc: FunnelClient = Depends(get_funnel_client)) -> dict[str, Any]:
     try:
-        summary = run_training()
+        summary = run_training(fc)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except Exception as exc:
@@ -39,32 +31,19 @@ def train() -> dict[str, Any]:
 
 
 @router.get("/training-status")
-def training_status() -> dict[str, Any]:
-    """Devuelve métricas del último modelo entrenado en models/."""
+def training_status(fc: FunnelClient = Depends(get_funnel_client)) -> dict[str, Any]:
     try:
-        return get_training_status()
+        return get_training_status(fc)
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
 @router.get("/latest-prediction")
-def latest_prediction() -> dict[str, Any]:
-    """Devuelve la predicción más reciente. Retorna {} si no hay ninguna."""
-    try:
-        result = get_latest_prediction()
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+def latest_prediction(fc: FunnelClient = Depends(get_funnel_client)) -> dict[str, Any]:
+    result = fc.get_latest_prediction()
     return result or {}
 
 
 @router.get("/prediction-history")
-def prediction_history() -> list[dict[str, Any]]:
-    """
-    Devuelve todas las predicciones guardadas (más reciente primero).
-    Incluye full_result para que el frontend pueda navegar el historial sin
-    hacer una llamada adicional por semana.
-    """
-    try:
-        return get_prediction_history()
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+def prediction_history(fc: FunnelClient = Depends(get_funnel_client)) -> list[dict[str, Any]]:
+    return fc.get_prediction_history()

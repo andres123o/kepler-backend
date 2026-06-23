@@ -10,14 +10,7 @@ from typing import Any
 
 from app.services.anthropic_client import call_basic_agent, call_premium_agent
 from app.services.customerio_fly_client import build_journey
-from app.services.supabase_client import (
-    get_campaigns_cache,
-    get_funnel_steps,
-    get_knowledge_base,
-    get_latest_prediction,
-    save_strategy_result,
-    save_structural_result,
-)
+from app.services.supabase_client import FunnelClient, _default_fc
 
 logger = logging.getLogger("kepler.strategy_agent")
 
@@ -33,23 +26,10 @@ def _get_n_nodos(c: dict[str, Any]) -> int | None:
 
 # ─── Formatters para el prompt ────────────────────────────────────────────────
 
-# Variables internas de funnel/KYC — no accionables por marketing, excluidas del agente premium
-_INTERNAL_FUNNEL_VARS: frozenset[str] = frozenset({
-    "step_09_full_account",
-    "tasa_basic_a_risk",
-    "tasa_risk_a_fulldata",
-    "tasa_fulldata_a_video",
-    "tasa_video_a_review",
-    "pct_perfil_conservador",
-    "pct_perfil_arriesgado",
-    "full_users_aprobados",
-})
-
-
-def _format_shap_analysis(prediction: dict[str, Any]) -> str:
+def _format_shap_analysis(prediction: dict[str, Any], internal_vars: frozenset[str] = frozenset()) -> str:
     """
     Formatea análisis SHAP para el agente premium — solo variables externas/accionables.
-    Las variables internas de funnel/KYC se excluyen: no son accionables vía CIO.
+    internal_vars viene del config JSONB del funnel (clave "ml_internal_features").
     """
     full = prediction.get("full_result") or prediction
 
@@ -60,7 +40,7 @@ def _format_shap_analysis(prediction: dict[str, Any]) -> str:
 
     contexto_raw: list[dict] = full.get("contexto_historico_top_features") or []
     # Solo variables externas — marketing no puede actuar sobre métricas internas de funnel
-    contexto = [f for f in contexto_raw if f.get("feature") not in _INTERNAL_FUNNEL_VARS]
+    contexto = [f for f in contexto_raw if f.get("feature") not in internal_vars]
 
     if not contexto:
         return (
@@ -373,14 +353,14 @@ def _build_nodos_completos(
 
 # ─── Funciones principales ────────────────────────────────────────────────────
 
-def get_funnel_health() -> list[dict[str, Any]]:
+def get_funnel_health(fc: FunnelClient) -> list[dict[str, Any]]:
     """
     Devuelve diagnóstico detallado del funnel basado en el cache de campañas.
     Semáforo: verde/amarillo/rojo/spike — considera tasas reales, no solo estado.
     NO requiere CIO API key — solo lee el cache de Supabase (poblado por /sync).
     """
-    funnel_steps = get_funnel_steps()
-    campaigns = get_campaigns_cache()
+    funnel_steps = fc.get_funnel_steps()
+    campaigns = fc.get_campaigns_cache()
 
     step_map: dict[str, list[dict]] = {s["step_code"]: [] for s in funnel_steps}
     for c in campaigns:
@@ -522,7 +502,7 @@ def get_funnel_health() -> list[dict[str, Any]]:
     return result
 
 
-def generate_premium_strategy() -> dict[str, Any]:
+def generate_premium_strategy(fc: FunnelClient, market_research: dict | None = None) -> dict[str, Any]:
     """
     Flujo único del agente premium (campaña marcada como agent_tier='premium' en Supabase).
 
@@ -531,9 +511,14 @@ def generate_premium_strategy() -> dict[str, Any]:
       2. Campaña premium leída desde cio_campaigns_cache (NO hardcodeada)
       3. Journey completo desde CIO fly API
       4. Knowledge Base
-      5. Research Perplexity (sonar-pro, variables exógenas completas)
+      5. Research Perplexity (sonar-pro) — se salta si market_research ya viene provisto
       6. Una sola llamada Claude con PREMIUM_AGENT_SYSTEM_PROMPT
       7. Guardar + retornar
+
+    Args:
+        fc: FunnelClient del funnel activo.
+        market_research: resultado pre-fetched de Perplexity ({"raw_text": ..., "citations": [...]}).
+                         Si es None, se llama a Perplexity internamente.
     """
     from app.services.perplexity_client import fetch_market_research, format_research_block
 
@@ -541,16 +526,17 @@ def generate_premium_strategy() -> dict[str, Any]:
     logger.info("[PREMIUM] Iniciando flujo agente premium")
 
     # 1. SHAP + proyección
-    prediction = get_latest_prediction()
+    prediction = fc.get_latest_prediction()
     if not prediction:
         raise ValueError("No hay predicción guardada. Corre primero /api/ml/predict.")
 
     semana_label = prediction.get("semana_label") or prediction.get("semana_datos", "")
     logger.info("[PREMIUM] Semana: %s", semana_label)
-    shap_text = _format_shap_analysis(prediction)
+    internal_vars = frozenset(fc.get_funnel_config().get("ml_internal_features") or [])
+    shap_text = _format_shap_analysis(prediction, internal_vars)
 
     # 2. Campaña premium desde Supabase (agent_tier='premium' — NO hardcodeado)
-    campaigns = get_campaigns_cache()
+    campaigns = fc.get_campaigns_cache()
     premium_campaign = next(
         (c for c in campaigns if c.get("agent_tier") == "premium"),
         None,
@@ -567,23 +553,37 @@ def generate_premium_strategy() -> dict[str, Any]:
     logger.info("[PREMIUM] Campaña premium: '%s' (ID %s)", cname, cid)
 
     # 3. Journey completo desde CIO fly API
-    journey    = build_journey(cid)
+    journey    = build_journey(cid, fc)
     journey_text = _format_journey_for_enrichment(journey)
     msg_nodes  = [n for n in journey["nodes"] if n.get("type") in ("email_action", "push_action")]
     logger.info("[PREMIUM] Journey: %d nodos totales | %d mensajes", len(journey["nodes"]), len(msg_nodes))
 
     # 4. Knowledge Base
-    kb_entries = get_knowledge_base()
+    kb_entries = fc.get_knowledge_base()
     kb_text    = _format_knowledge_base(kb_entries)
 
-    # 5. Research Perplexity
-    logger.info("[PREMIUM] Fetching research Perplexity (sonar-pro)...")
-    research      = fetch_market_research(semana_label)
-    research_text = format_research_block(research)
-    logger.info("[PREMIUM] Research: %d chars | %d citations",
-                len(research_text), len(research.get("citations", [])))
+    # 5. Research Perplexity — usa el provisto externamente o fetcha uno nuevo
+    if market_research is not None:
+        research      = market_research
+        research_text = format_research_block(research)
+        logger.info("[PREMIUM] Research provisto externamente: %d chars | %d citations",
+                    len(research_text), len(research.get("citations", [])))
+    else:
+        logger.info("[PREMIUM] Fetching research Perplexity (sonar-pro)...")
+        research      = fetch_market_research(semana_label, fc=fc)
+        research_text = format_research_block(research)
+        logger.info("[PREMIUM] Research: %d chars | %d citations",
+                    len(research_text), len(research.get("citations", [])))
 
-    # 6. Una sola llamada Claude con PREMIUM_AGENT_SYSTEM_PROMPT
+    # 6. Prompts desde BD del funnel — sin fallback, error explícito si faltan
+    system_prompt = fc.get_agent_prompt("premium", "system")
+    kb_preamble   = fc.get_agent_prompt("premium", "kb_preamble")
+    user_template = fc.get_agent_prompt("premium", "user_template")
+    if not system_prompt or not kb_preamble or not user_template:
+        raise RuntimeError(
+            "funnel_prompts le faltan filas a premium: system, kb_preamble o user_template. "
+            "Corre seed_prompts.py para este funnel."
+        )
     logger.info("[PREMIUM] Llamando agente premium Claude...")
     strategy = call_premium_agent(
         shap_text=shap_text,
@@ -591,6 +591,9 @@ def generate_premium_strategy() -> dict[str, Any]:
         kb_text=kb_text,
         journey_text=journey_text,
         semana_label=semana_label,
+        system_prompt=system_prompt,
+        kb_preamble=kb_preamble,
+        user_template=user_template,
     )
     strategy["semana_label"] = semana_label
 
@@ -603,7 +606,7 @@ def generate_premium_strategy() -> dict[str, Any]:
 
     # 7. Guardar resultado
     try:
-        save_strategy_result(strategy)
+        fc.save_strategy_result(strategy)
         logger.info("[PREMIUM] Resultado guardado en strategy_results")
     except Exception as exc:
         logger.error("[PREMIUM] ❌ FALLO AL GUARDAR strategy_results: %s", exc, exc_info=True)
@@ -613,7 +616,7 @@ def generate_premium_strategy() -> dict[str, Any]:
     return strategy
 
 
-def generate_basic_strategy() -> dict[str, Any]:
+def generate_basic_strategy(fc: FunnelClient) -> dict[str, Any]:
     """
     Flujo del agente básico (campañas con agent_tier='basic' en Supabase).
 
@@ -630,7 +633,7 @@ def generate_basic_strategy() -> dict[str, Any]:
     logger.info("[BASIC] Iniciando flujo agente básico")
 
     # 1. Campañas básicas (agent_tier='basic' en Supabase)
-    campaigns = get_campaigns_cache()
+    campaigns = fc.get_campaigns_cache()
     basic_campaigns = [c for c in campaigns if c.get("agent_tier") == "basic"]
 
     if not basic_campaigns:
@@ -649,7 +652,7 @@ def generate_basic_strategy() -> dict[str, Any]:
         step_code  = c.get("funnel_step_mapped")
         step_name  = c.get("funnel_step_name")
         try:
-            journey = build_journey(cid)
+            journey = build_journey(cid, fc)
             journeys_by_cid[cid] = journey
             msg_count = sum(
                 1 for n in journey["nodes"]
@@ -665,34 +668,45 @@ def generate_basic_strategy() -> dict[str, Any]:
 
     journeys_text = "\n\n".join(journey_blocks)
 
-    # 3. Knowledge Base completo — productos trii + compliance
-    kb_entries = get_knowledge_base()
+    # 3. Knowledge Base completo
+    kb_entries = fc.get_knowledge_base()
     kb_text    = _format_knowledge_base(kb_entries)
     logger.info("[BASIC] KB: %d entries activos", len(kb_entries))
 
-    # 4. Contexto de calendario (Perplexity sonar)
+    # 4. Contexto de calendario — query y params desde BD del funnel
     from app.services.perplexity_client import fetch_calendar_context, format_calendar_block
 
     fecha_hoy = date.today().isoformat()
     logger.info("[BASIC] Fetching calendar context (Perplexity sonar) | fecha=%s", fecha_hoy)
-    calendar      = fetch_calendar_context(fecha_hoy)
+    calendar      = fetch_calendar_context(fecha_hoy, fc=fc)
     calendar_text = format_calendar_block(calendar)
     logger.info("[BASIC] Calendario: festivos=%d | citations=%d",
                 len((calendar.get("raw_json") or {}).get("festivos_semana", [])),
                 len(calendar.get("citations", [])))
 
-    # 5. Una sola llamada Claude con BASIC_AGENT_SYSTEM_PROMPT
-    logger.info("[BASIC] Llamando agente básico Claude | fecha=%s", fecha_hoy)
+    # 5. Prompts desde BD del funnel — sin fallback, error explícito si faltan
+    system_prompt = fc.get_agent_prompt("basic", "system")
+    kb_preamble   = fc.get_agent_prompt("basic", "kb_preamble")
+    user_template = fc.get_agent_prompt("basic", "user_template")
+    if not system_prompt or not kb_preamble or not user_template:
+        raise RuntimeError(
+            "funnel_prompts le faltan filas a basic: system, kb_preamble o user_template. "
+            "Corre seed_prompts.py para este funnel."
+        )
+    logger.info("[BASIC] Llamando agente basico Claude | fecha=%s", fecha_hoy)
     strategy = call_basic_agent(
         kb_text=kb_text,
         journeys_text=journeys_text,
         fecha_hoy=fecha_hoy,
         calendar_text=calendar_text,
+        system_prompt=system_prompt,
+        kb_preamble=kb_preamble,
+        user_template=user_template,
     )
     # Usar semana_label de la predicción (ej. "15 al 21 de junio 2026") para que el
     # frontend pueda compararlo contra predLabel y no lo marque como estrategia vieja.
     # Fallback a fecha_hoy si no hay predicción guardada.
-    prediction = get_latest_prediction()
+    prediction = fc.get_latest_prediction()
     strategy["semana_label"] = (prediction.get("semana_label") if prediction else None) or fecha_hoy
 
     # Attachar nodos_completos para el canvas: una por acción, matcheando su journey
@@ -710,7 +724,7 @@ def generate_basic_strategy() -> dict[str, Any]:
 
     # 6. Guardar resultado (estructural — distingue de premium en la DB)
     try:
-        save_structural_result(strategy)
+        fc.save_structural_result(strategy)
         logger.info("[BASIC] Resultado guardado en strategy_results (_tipo=estructural)")
     except Exception as exc:
         logger.error("[BASIC] ❌ FALLO AL GUARDAR strategy_results: %s", exc, exc_info=True)
@@ -721,7 +735,7 @@ def generate_basic_strategy() -> dict[str, Any]:
 
 
 
-def execute_strategy(strategy: dict[str, Any]) -> dict[str, Any]:
+def execute_strategy(strategy: dict[str, Any], fc: FunnelClient) -> dict[str, Any]:
     """
     Ejecuta las acciones aprobadas de una estrategia en CIO.
     Solo ejecuta acciones con prioridad != 'sin_accion'.
@@ -731,6 +745,8 @@ def execute_strategy(strategy: dict[str, Any]) -> dict[str, Any]:
     - Máximo CIO_MAX_CAMPAIGNS_PER_EXECUTE operaciones por llamada (default 3)
     - Anti-duplicado en create_campaign (ver customerio_client.py)
     - Nunca toca la Track API — solo Journeys App API
+    fc: FunnelClient requerido — lee trigger_event, conversion_event, cashin_attribute
+        desde config JSONB del funnel (sección 'cio').
     """
     # ⚠️  WRITE — solo se ejecuta si CIO_DRY_RUN=false en .env (bloqueado por defecto)
     from app.services.customerio_client import _MAX_OPS
@@ -760,7 +776,7 @@ def execute_strategy(strategy: dict[str, Any]) -> dict[str, Any]:
 
         try:
             if tipo == "crear":
-                result = _create_journey_from_propuesta(propuesta)
+                result = _create_journey_from_propuesta(propuesta, fc)
                 executed.append({
                     "step_code": accion["step_code"],
                     "tipo": "crear",
@@ -798,24 +814,38 @@ def execute_strategy(strategy: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _create_journey_from_propuesta(propuesta: dict[str, Any]) -> dict[str, Any]:
+def _create_journey_from_propuesta(propuesta: dict[str, Any], fc: FunnelClient) -> dict[str, Any]:
     """
     Crea un journey completo en CIO a partir de la propuesta del agente.
     Sigue el patrón de la campaña Kepler v4:
     AB split → [delay + time_window + push + check_cashin] × nodos → exit
+
+    fc: requerido para leer trigger_event, conversion_event y cashin_attribute
+        desde la sección 'cio' del config JSONB del funnel.
     """
     # ⚠️  WRITE — usa CUSTOMERIO_APP_API_KEY, NO el token sa_live.
     # Todas estas funciones llaman _guard_write() que bloquea si CIO_DRY_RUN=true.
     from app.services.customerio_client import create_campaign, add_action, add_edge, activate_campaign
 
+    cio_cfg = fc.get_cio_config()
+    default_trigger  = cio_cfg.get("trigger_event")
+    default_conv     = cio_cfg.get("conversion_event")
+    cashin_attribute = cio_cfg.get("cashin_attribute")
+
+    if not default_trigger or not default_conv or not cashin_attribute:
+        raise ValueError(
+            "La sección 'cio' del config JSONB del funnel debe incluir "
+            "'trigger_event', 'conversion_event' y 'cashin_attribute'."
+        )
+
     config = {
-        "name": propuesta.get("nombre_campaña", "CO_Kepler_Journey"),
+        "name": propuesta.get("nombre_campaña", f"{fc.funnel_slug}_Kepler_Journey"),
         "type": "transactional",
-        "event": propuesta.get("trigger_event", "BeFullUserCreated"),
+        "event": propuesta.get("trigger_event") or default_trigger,
         "event_type": "event",
         "conversion_type": "perform_event",
         "conversion_action": "receiving",
-        "conversion_event_name": propuesta.get("conversion_event", "BeCashIn"),
+        "conversion_event_name": propuesta.get("conversion_event") or default_conv,
         "conversion_window": 604800,
         "restart_mode": "rematch",
         "exit_on_conversion_matched": False,
@@ -824,10 +854,10 @@ def _create_journey_from_propuesta(propuesta: dict[str, Any]) -> dict[str, Any]:
         "anchors": [],
     }
 
-    campaign = create_campaign(config)
+    campaign = create_campaign(config, fc)
     campaign_id = campaign["id"]
 
-    exit_action = add_action(campaign_id, {"type": "exit_action", "sub_type": "default"})
+    exit_action = add_action(campaign_id, {"type": "exit_action", "sub_type": "default"}, fc)
     exit_id = str(exit_action["id"])
 
     prev_id: str | None = None
@@ -841,11 +871,11 @@ def _create_journey_from_propuesta(propuesta: dict[str, Any]) -> dict[str, Any]:
             "type": "delay_seconds_action",
             "sub_type": "default",
             "delay": delay_secs,
-        })
+        }, fc)
         delay_id = str(delay["id"])
 
         if prev_id:
-            add_edge(campaign_id, prev_id, delay_id)
+            add_edge(campaign_id, prev_id, delay_id, fc=fc)
 
         subject_liquid  = nodo.get("subject", "")
         cuerpo_liquid   = nodo.get("cuerpo", "")
@@ -860,7 +890,7 @@ def _create_journey_from_propuesta(propuesta: dict[str, Any]) -> dict[str, Any]:
                 "body": cuerpo_liquid,
                 "sending_state": "automatic",
                 "send_to_platform": "all",
-            })
+            }, fc)
         else:
             email_payload: dict[str, Any] = {
                 "type": "email_action",
@@ -872,7 +902,7 @@ def _create_journey_from_propuesta(propuesta: dict[str, Any]) -> dict[str, Any]:
             }
             if preheader_liquid:
                 email_payload["preheader"] = preheader_liquid
-            msg_action = add_action(campaign_id, email_payload)
+            msg_action = add_action(campaign_id, email_payload, fc)
 
         msg_id = str(msg_action["id"])
         add_edge(campaign_id, delay_id, msg_id)
@@ -880,30 +910,30 @@ def _create_journey_from_propuesta(propuesta: dict[str, Any]) -> dict[str, Any]:
         check = add_action(campaign_id, {
             "type": "conditional_branch_action",
             "sub_type": "default",
-            "conditions": [{"field": "date_first_cashin", "operator": "exists", "type": "attribute"}],
+            "conditions": [{"field": cashin_attribute, "operator": "exists", "type": "attribute"}],
         })
         check_id = str(check["id"])
-        add_edge(campaign_id, msg_id, check_id)
-        add_edge(campaign_id, check_id, exit_id, edge_type="branch", index=0)
+        add_edge(campaign_id, msg_id, check_id, fc=fc)
+        add_edge(campaign_id, check_id, exit_id, fc=fc, edge_type="branch", index=0)
 
         prev_id = check_id
 
     if prev_id:
-        add_edge(campaign_id, prev_id, exit_id, edge_type="branch", index=1)
+        add_edge(campaign_id, prev_id, exit_id, fc=fc, edge_type="branch", index=1)
 
-    activate_campaign(campaign_id)
+    activate_campaign(campaign_id, fc=fc)
     logger.info("Journey creado y activado: id=%s nombre=%s", campaign_id, config["name"])
     return campaign
 
 
-def _update_journey_copy(campaign_id: str, propuesta: dict[str, Any]) -> dict[str, Any]:
+def _update_journey_copy(campaign_id: str, propuesta: dict[str, Any], fc: FunnelClient) -> dict[str, Any]:
     """
     Actualiza el copy de los nodos email/push de una campaña existente.
+    fc: FunnelClient requerido para credenciales CIO desde org_secrets.
     """
-    # get_campaign → READONLY (sa_live) | update_action → WRITE (guarded)
     from app.services.customerio_client import get_campaign, update_action
 
-    campaign = get_campaign(campaign_id)
+    campaign = get_campaign(campaign_id, fc)
     actions = campaign.get("actions", [])
     nodos_propuesta = propuesta.get("nodos", [])
 
@@ -918,7 +948,7 @@ def _update_journey_copy(campaign_id: str, propuesta: dict[str, Any]) -> dict[st
             break
         nodo = nodos_propuesta[i]
         subject_liquid = nodo.get("subject", "")
-        update_action(campaign_id, str(action["id"]), {"subject": subject_liquid})
+        update_action(campaign_id, str(action["id"]), {"subject": subject_liquid}, fc=fc)
         updated += 1
 
     return {"nodos_actualizados": updated}

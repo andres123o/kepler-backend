@@ -1,7 +1,9 @@
 from typing import Any
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
+
+from app.services.supabase_client import FunnelClient, get_funnel_client
 
 router = APIRouter()
 
@@ -34,15 +36,14 @@ def run_measurement(body: MeasurementRequest) -> dict[str, Any]:
 # ── Snapshots manuales (HTML generado por Claude desde resultados BQ) ─────────
 
 @router.post("/save-snapshot")
-def save_snapshot(body: SaveSnapshotPayload) -> dict[str, Any]:
+def save_snapshot(body: SaveSnapshotPayload, fc: FunnelClient = Depends(get_funnel_client)) -> dict[str, Any]:
     """
     Guarda un snapshot de medición semanal.
     Flujo: corres las queries en BQ → pegas resultados en Claude → Claude genera HTML
     → pegas el HTML aquí → queda guardado y visible en el historial.
     """
-    from app.services.supabase_client import save_measurement_snapshot
     try:
-        return save_measurement_snapshot(
+        return fc.save_measurement_snapshot(
             semana_label=body.semana_label,
             html_content=body.html_content,
             inicio_semana=body.inicio_semana,
@@ -54,21 +55,19 @@ def save_snapshot(body: SaveSnapshotPayload) -> dict[str, Any]:
 
 
 @router.get("/snapshots")
-def list_snapshots() -> list[dict[str, Any]]:
+def list_snapshots(fc: FunnelClient = Depends(get_funnel_client)) -> list[dict[str, Any]]:
     """Lista todos los snapshots guardados (solo metadatos, sin html_content)."""
-    from app.services.supabase_client import get_measurement_snapshots
     try:
-        return get_measurement_snapshots()
+        return fc.get_measurement_snapshots()
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
 @router.get("/snapshots/{snapshot_id}")
-def get_snapshot(snapshot_id: str) -> dict[str, Any]:
+def get_snapshot(snapshot_id: str, fc: FunnelClient = Depends(get_funnel_client)) -> dict[str, Any]:
     """Devuelve un snapshot completo por ID (incluye html_content)."""
-    from app.services.supabase_client import get_measurement_snapshot
     try:
-        snap = get_measurement_snapshot(snapshot_id)
+        snap = fc.get_measurement_snapshot(snapshot_id)
         if snap is None:
             raise HTTPException(status_code=404, detail="Snapshot no encontrado")
         return snap

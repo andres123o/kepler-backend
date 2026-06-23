@@ -3,7 +3,7 @@ import logging
 import os
 from typing import Any
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
 from app.services.customerio_client import sync_campaigns_to_supabase
@@ -13,20 +13,14 @@ from app.services.strategy_agent import (
     generate_premium_strategy,
     get_funnel_health,
 )
-from app.services.supabase_client import (
-    get_admin_status,
-    get_all_assignments,
-    get_campaigns_cache,
-    get_funnel_context,
-    get_funnel_steps,
-    get_knowledge_base,
-    get_latest_strategy,
-    get_strategy_history,
-    get_user_campaign,
-)
+from app.services.supabase_client import FunnelClient, get_funnel_client
 
 router = APIRouter()
 logger = logging.getLogger("kepler.strategy_router")
+
+
+class GeneratePremiumRequest(BaseModel):
+    market_research: dict | None = None
 
 
 class ExecuteStrategyPayload(BaseModel):
@@ -34,8 +28,8 @@ class ExecuteStrategyPayload(BaseModel):
 
 
 class UpdateNodePayload(BaseModel):
-    action_id: int    # id_nodo_cio — usado para cooldown y logging
-    template_id: int  # ID del template CIO donde vive el copy
+    action_id: int
+    template_id: int
     subject: str
     cuerpo: str
     preheader: str | None = None
@@ -47,13 +41,13 @@ class UpdateNodePayload(BaseModel):
 class ValidateNode(BaseModel):
     id_nodo_cio: int
     template_id: int
-    tipo: str                    # 'email' | 'push'
+    tipo: str
     subject: str
     cuerpo: str
     preheader: str | None = None
     nombre: str | None = None
     campaign_name: str | None = None
-    step_code: str | None = None  # funnel_step_mapped de la campaña
+    step_code: str | None = None
 
 
 class ValidateAndSendPayload(BaseModel):
@@ -64,10 +58,6 @@ class ValidateAndSendPayload(BaseModel):
 
 @router.get("/safety-status")
 def safety_status() -> dict[str, Any]:
-    """
-    Muestra el estado de los controles de seguridad de escritura a CIO.
-    Revisar antes de ejecutar cualquier estrategia.
-    """
     dry_run = os.getenv("CIO_DRY_RUN", "true").lower() == "true"
     max_ops = int(os.getenv("CIO_MAX_CAMPAIGNS_PER_EXECUTE", "3"))
     has_key = bool(os.getenv("CUSTOMERIO_APP_API_KEY", ""))
@@ -85,13 +75,9 @@ def safety_status() -> dict[str, Any]:
 
 
 @router.post("/sync")
-def sync_campaigns() -> dict[str, Any]:
-    """
-    Sincroniza las campañas de Customer.io con el cache de Supabase.
-    Requiere CUSTOMERIO_APP_API_KEY. Correr antes de generate.
-    """
+def sync_campaigns(fc: FunnelClient = Depends(get_funnel_client)) -> dict[str, Any]:
     try:
-        result = sync_campaigns_to_supabase()
+        result = sync_campaigns_to_supabase(fc)
     except RuntimeError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     except Exception as exc:
@@ -100,28 +86,33 @@ def sync_campaigns() -> dict[str, Any]:
 
 
 @router.get("/funnel-health")
-def funnel_health() -> list[dict[str, Any]]:
-    """
-    Estado de salud del funnel: semáforo verde/amarillo/rojo por paso.
-    Lee desde el cache de Supabase (no necesita API de CIO).
-    """
+def funnel_health(fc: FunnelClient = Depends(get_funnel_client)) -> list[dict[str, Any]]:
     try:
-        return get_funnel_health()
+        return get_funnel_health(fc)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@router.post("/fetch-research")
+def fetch_research(fc: FunnelClient = Depends(get_funnel_client)) -> dict[str, Any]:
+    from app.services.perplexity_client import fetch_market_research
+    try:
+        prediction   = fc.get_latest_prediction()
+        semana_label = (prediction or {}).get("semana_label") or (prediction or {}).get("semana_datos", "")
+        return fetch_market_research(semana_label, fc=fc)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
 @router.post("/generate-premium")
-def generate_premium() -> dict[str, Any]:
-    """
-    Genera la estrategia semanal usando el agente premium (campaña Primer Depósito).
-
-    Flujo único: SHAP + Perplexity research + Journey CIO → una sola llamada Claude.
-    La campaña se identifica desde Supabase (agent_tier='premium'), no está hardcodeada.
-    Requiere: predicción ML en Supabase + ANTHROPIC_API_KEY + PERPLEXITY_API_KEY.
-    """
+def generate_premium(
+    body: GeneratePremiumRequest,
+    fc: FunnelClient = Depends(get_funnel_client),
+) -> dict[str, Any]:
     try:
-        return generate_premium_strategy()
+        return generate_premium_strategy(fc, market_research=body.market_research)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except RuntimeError as exc:
@@ -131,16 +122,9 @@ def generate_premium() -> dict[str, Any]:
 
 
 @router.post("/generate-basic")
-def generate_basic() -> dict[str, Any]:
-    """
-    Genera la revisión semanal del funnel básico usando el agente de orquestación Tier Básico.
-
-    Flujo: Journeys CIO (campañas agent_tier='basic') + Compliance KB + fecha → Claude.
-    Sin SHAP ni Perplexity. Deriva contexto solo del calendario colombiano.
-    Requiere: ANTHROPIC_API_KEY + campañas con agent_tier='basic' en Supabase.
-    """
+def generate_basic(fc: FunnelClient = Depends(get_funnel_client)) -> dict[str, Any]:
     try:
-        return generate_basic_strategy()
+        return generate_basic_strategy(fc)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except RuntimeError as exc:
@@ -150,40 +134,31 @@ def generate_basic() -> dict[str, Any]:
 
 
 @router.get("/system-context")
-def system_context() -> dict[str, Any]:
-    """
-    Retorna todos los datos de contexto activos en el sistema:
-    funnel_steps, campañas en cache, eventos CIO, atributos CIO, knowledge base.
-    Muestra exactamente qué datos ve Claude al generar la estrategia.
-    """
+def system_context(fc: FunnelClient = Depends(get_funnel_client)) -> dict[str, Any]:
     try:
-        campaigns = get_campaigns_cache()
-        # Excluir weekly JSON del payload (muy grande, no necesario en esta vista)
+        campaigns = fc.get_campaigns_cache()
         slim_campaigns = [
             {k: v for k, v in c.items() if k != "metrics_weekly_json"}
             for c in campaigns
         ]
-
-        context = get_funnel_context()
+        context    = fc.get_funnel_context()
         events     = [c for c in context if c.get("record_type") == "event"]
         attributes = [c for c in context if c.get("record_type") == "attribute"]
-
         return {
-            "funnel_steps":     get_funnel_steps(),
-            "campaigns_cache":  slim_campaigns,
-            "events":           events,
-            "attributes":       attributes,
-            "knowledge_base":   get_knowledge_base(),
+            "funnel_steps":    fc.get_funnel_steps(),
+            "campaigns_cache": slim_campaigns,
+            "events":          events,
+            "attributes":      attributes,
+            "knowledge_base":  fc.get_knowledge_base(),
         }
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
 @router.get("/latest")
-def latest_strategy() -> dict[str, Any]:
-    """Devuelve la estrategia más reciente guardada, o 404 si no hay ninguna."""
+def latest_strategy(fc: FunnelClient = Depends(get_funnel_client)) -> dict[str, Any]:
     try:
-        result = get_latest_strategy()
+        result = fc.get_latest_strategy()
         if result is None:
             raise HTTPException(status_code=404, detail="No hay estrategias guardadas.")
         return result
@@ -194,31 +169,26 @@ def latest_strategy() -> dict[str, Any]:
 
 
 @router.get("/history")
-def strategy_history() -> list[dict[str, Any]]:
-    """Devuelve el historial completo de estrategias en orden descendente."""
+def strategy_history(fc: FunnelClient = Depends(get_funnel_client)) -> list[dict[str, Any]]:
     try:
-        return get_strategy_history()
+        return fc.get_strategy_history()
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
 @router.get("/latest-structural")
-def latest_structural() -> dict[str, Any]:
-    """Devuelve el resultado básico (estructural) más reciente, o 404 si no hay ninguno."""
-    from app.services.supabase_client import get_latest_structural
-    result = get_latest_structural()
+def latest_structural(fc: FunnelClient = Depends(get_funnel_client)) -> dict[str, Any]:
+    result = fc.get_latest_structural()
     if not result:
         raise HTTPException(status_code=404, detail="No hay resultado estructural guardado")
     return result
 
 
 @router.post("/update-node")
-def update_node(payload: UpdateNodePayload) -> dict[str, Any]:
-    """
-    Actualiza el copy de un nodo específico en Customer.io.
-    Máximo 2 requests a CIO por llamada (GET template + PUT template).
-    Cooldown de 30s por nodo para prevenir actualizaciones duplicadas.
-    """
+def update_node(
+    payload: UpdateNodePayload,
+    fc: FunnelClient = Depends(get_funnel_client),
+) -> dict[str, Any]:
     from app.services.customerio_fly_writer import update_node_copy
     try:
         return update_node_copy(
@@ -230,9 +200,9 @@ def update_node(payload: UpdateNodePayload) -> dict[str, Any]:
             user_name=payload.user_name,
             campaign_name=payload.campaign_name,
             semana_label=payload.semana_label,
+            fc=fc,
         )
     except RuntimeError as exc:
-        # Cooldown activo → 429. Cualquier otro RuntimeError (config, JWT) → 503.
         status = 429 if "Cooldown activo" in str(exc) else 503
         raise HTTPException(status_code=status, detail=str(exc)) from exc
     except Exception as exc:
@@ -240,63 +210,61 @@ def update_node(payload: UpdateNodePayload) -> dict[str, Any]:
 
 
 @router.get("/sent-nodes")
-def sent_nodes(semana_label: str, after: str | None = None) -> dict[str, Any]:
-    """
-    Devuelve action_ids enviados a CIO para la semana.
-    after: ISO timestamp — filtra solo los enviados desde esa fecha (aísla por estrategia).
-    """
-    from app.services.supabase_client import get_sent_nodes
-    return {"semana_label": semana_label, "sent": get_sent_nodes(semana_label, after)}
+def sent_nodes(
+    semana_label: str,
+    after: str | None = None,
+    fc: FunnelClient = Depends(get_funnel_client),
+) -> dict[str, Any]:
+    return {"semana_label": semana_label, "sent": fc.get_sent_nodes(semana_label, after)}
 
 
 @router.get("/assignment")
-def get_assignment(user_name: str) -> dict[str, Any]:
-    """Devuelve la campaña asignada al usuario. Usado por el frontend para filtrar canvas."""
-    campaign = get_user_campaign(user_name)
-    return {"user_name": user_name, "campaign": campaign}
+def get_assignment(
+    user_name: str,
+    fc: FunnelClient = Depends(get_funnel_client),
+) -> dict[str, Any]:
+    return {"user_name": user_name, "campaign": fc.get_user_campaign(user_name)}
 
 
 @router.get("/assignments")
-def get_assignments() -> list[dict[str, Any]]:
-    """Devuelve todas las asignaciones. Solo para admin."""
-    return get_all_assignments()
+def get_assignments(fc: FunnelClient = Depends(get_funnel_client)) -> list[dict[str, Any]]:
+    return fc.get_all_assignments()
 
 
 @router.get("/admin-status")
-def admin_status() -> list[dict[str, Any]]:
-    """Panel admin: estado de cada agente — nodos actualizados y última actividad."""
+def admin_status(fc: FunnelClient = Depends(get_funnel_client)) -> list[dict[str, Any]]:
     try:
-        return get_admin_status()
+        return fc.get_admin_status()
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
 @router.post("/validate-and-send")
-async def validate_and_send(payload: ValidateAndSendPayload) -> dict[str, Any]:
-    """
-    Valida y envía cada nodo a CIO de forma independiente y secuencial.
-
-    Flujo por nodo:
-      L1 (determinista, $0) → si falla → status='cambios' con error exacto
-      L2 (Claude judge, ~$0.006) → si falla → status='cambios' con razón del juez
-      send (update_node_copy) → status='listo' | status='error_envio'
-
-    300ms de delay entre nodos: evita rate limits de CIO + efecto visual en canvas.
-    Si el juez L2 falla con excepción (timeout/API error) → se envía igualmente (L1 ya validó).
-    """
+async def validate_and_send(
+    payload: ValidateAndSendPayload,
+    fc: FunnelClient = Depends(get_funnel_client),
+) -> dict[str, Any]:
     from app.services.copy_validator import validate_node
     from app.services.anthropic_client import call_judge_agent
     from app.services.customerio_fly_writer import update_node_copy
 
-    kb_entries = get_knowledge_base()
-
-    # KB completo como texto plano — el judge necesita todo el contexto para
-    # verificar cifras correctamente; el keyword-matching parcial perdía entradas.
+    funnel_cfg = fc.get_funnel_config()
+    company_description = funnel_cfg.get("company_description") or ""
+    kb_entries = fc.get_knowledge_base()
     kb_full = "\n\n".join(
         f"[{e.get('tipo', '').upper()}] {e.get('titulo', '')}:\n{e.get('contenido', '')}"
         for e in kb_entries
         if e.get("contenido")
     )
+    rules = funnel_cfg.get("validation_rules") or {}
+    if not rules:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "Este funnel no tiene 'validation_rules' configuradas. "
+                "Agrega el campo al config JSONB del funnel en Supabase antes de validar y enviar."
+            ),
+        )
 
     results: list[dict[str, Any]] = []
 
@@ -307,15 +275,11 @@ async def validate_and_send(payload: ValidateAndSendPayload) -> dict[str, Any]:
             "name": node.get("campaign_name") or "",
         }
 
-        await asyncio.sleep(0.3)  # delay visual + rate limit CIO
+        await asyncio.sleep(0.3)
 
-        # ── L1 — determinista ──────────────────────────────────────────────────
-        l1 = validate_node(node, campaign, kb_entries)
+        l1 = validate_node(node, campaign, kb_entries, rules=rules)
         if not l1["passed"]:
-            logger.info(
-                "[VALIDATE] L1 FALLO nodo %s: %s",
-                node_payload.id_nodo_cio, l1["errors"],
-            )
+            logger.info("[VALIDATE] L1 FALLO nodo %s: %s", node_payload.id_nodo_cio, l1["errors"])
             results.append({
                 "id_nodo_cio": node_payload.id_nodo_cio,
                 "status":   "cambios",
@@ -326,39 +290,30 @@ async def validate_and_send(payload: ValidateAndSendPayload) -> dict[str, Any]:
             })
             continue
 
-        # ── L2 — LLM judge ────────────────────────────────────────────────────
         judge_approved = True
         judge_reason: str = ""
         try:
-            verdict = call_judge_agent(node, campaign, kb_full)
+            verdict = call_judge_agent(node, campaign, kb_full, company_description)
             judge_approved = bool(verdict.get("aprobado", True))
             judge_reason   = verdict.get("razon", "")
-            logger.info(
-                "[VALIDATE] L2 %s nodo %s (confianza=%.2f): %s",
-                "OK" if judge_approved else "FALLO",
-                node_payload.id_nodo_cio,
-                verdict.get("confianza", 0.0),
-                judge_reason,
-            )
+            logger.info("[VALIDATE] L2 %s nodo %s (confianza=%.2f): %s",
+                        "OK" if judge_approved else "FALLO",
+                        node_payload.id_nodo_cio, verdict.get("confianza", 0.0), judge_reason)
         except Exception as exc:
-            # Si el judge falla → L1 ya pasó → dejamos pasar para no bloquear
-            logger.warning(
-                "[VALIDATE] L2 excepción nodo %s — enviando igualmente (L1 OK): %s",
-                node_payload.id_nodo_cio, exc,
-            )
+            logger.warning("[VALIDATE] L2 excepción nodo %s — enviando igualmente (L1 OK): %s",
+                           node_payload.id_nodo_cio, exc)
 
         if not judge_approved:
             results.append({
                 "id_nodo_cio": node_payload.id_nodo_cio,
                 "status":   "cambios",
                 "layer":    "L2",
-                "errors":   [judge_reason or "El juez rechazó el copy — revisá la alineación con el objetivo"],
+                "errors":   [judge_reason or "El juez rechazó el copy"],
                 "warnings": l1["warnings"],
                 "sent":     False,
             })
             continue
 
-        # ── Envío a CIO ────────────────────────────────────────────────────────
         try:
             update_node_copy(
                 action_id=node_payload.id_nodo_cio,
@@ -369,6 +324,7 @@ async def validate_and_send(payload: ValidateAndSendPayload) -> dict[str, Any]:
                 user_name=payload.user_name or "kepler-auto",
                 campaign_name=node_payload.campaign_name,
                 semana_label=payload.semana_label,
+                fc=fc,
             )
             logger.info("[VALIDATE] ENVIADO nodo %s", node_payload.id_nodo_cio)
             results.append({
@@ -380,12 +336,9 @@ async def validate_and_send(payload: ValidateAndSendPayload) -> dict[str, Any]:
                 "sent":     True,
             })
         except RuntimeError as exc:
-            # Cooldown activo (429) o error de config/JWT (503)
             status_code = 429 if "Cooldown activo" in str(exc) else 503
-            logger.warning(
-                "[VALIDATE] Error envío nodo %s (%d): %s",
-                node_payload.id_nodo_cio, status_code, exc,
-            )
+            logger.warning("[VALIDATE] Error envío nodo %s (%d): %s",
+                           node_payload.id_nodo_cio, status_code, exc)
             results.append({
                 "id_nodo_cio": node_payload.id_nodo_cio,
                 "status":   "cambios",
@@ -408,42 +361,43 @@ async def validate_and_send(payload: ValidateAndSendPayload) -> dict[str, Any]:
     total_sent  = sum(1 for r in results if r["sent"])
     total_block = sum(1 for r in results if not r["sent"])
     logger.info("[VALIDATE] Completado: %d enviados, %d bloqueados", total_sent, total_block)
-
-    return {
-        "results":      results,
-        "total_sent":   total_sent,
-        "total_blocked": total_block,
-    }
+    return {"results": results, "total_sent": total_sent, "total_blocked": total_block}
 
 
 @router.post("/validate-and-send-premium")
-async def validate_and_send_premium(payload: ValidateAndSendPayload) -> dict[str, Any]:
-    """
-    Valida y envía nodos del agente premium a CIO — pipeline independiente del básico.
-
-    L1 premium: SFC, voseo, Liquid, chars, KB rates. Sin restricción de market data.
-    L2 premium: verifica solo tasas/montos de producto contra KB; ignora cifras de mercado.
-    """
+async def validate_and_send_premium(
+    payload: ValidateAndSendPayload,
+    fc: FunnelClient = Depends(get_funnel_client),
+) -> dict[str, Any]:
     from app.services.copy_validator import validate_node_premium
     from app.services.anthropic_client import call_judge_agent_premium
     from app.services.customerio_fly_writer import update_node_copy
 
-    kb_entries = get_knowledge_base()
+    funnel_cfg = fc.get_funnel_config()
+    company_description = funnel_cfg.get("company_description") or ""
+    kb_entries = fc.get_knowledge_base()
     kb_full = "\n\n".join(
         f"[{e.get('tipo', '').upper()}] {e.get('titulo', '')}:\n{e.get('contenido', '')}"
         for e in kb_entries
         if e.get("contenido")
     )
+    rules = funnel_cfg.get("validation_rules") or {}
+    if not rules:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "Este funnel no tiene 'validation_rules' configuradas. "
+                "Agrega el campo al config JSONB del funnel en Supabase antes de validar y enviar."
+            ),
+        )
 
     results: list[dict[str, Any]] = []
 
     for node_payload in payload.nodes:
         node = node_payload.model_dump()
-
         await asyncio.sleep(0.3)
 
-        # ── L1 premium ────────────────────────────────────────────────────────
-        l1 = validate_node_premium(node, kb_entries)
+        l1 = validate_node_premium(node, kb_entries, rules=rules)
         if not l1["passed"]:
             logger.info("[VALIDATE-PREMIUM] L1 FALLO nodo %s: %s",
                         node_payload.id_nodo_cio, l1["errors"])
@@ -457,18 +411,16 @@ async def validate_and_send_premium(payload: ValidateAndSendPayload) -> dict[str
             })
             continue
 
-        # ── L2 premium ────────────────────────────────────────────────────────
         judge_approved = True
         judge_reason: str = ""
         try:
-            verdict = call_judge_agent_premium(node, kb_full)
+            verdict = call_judge_agent_premium(node, kb_full, company_description)
             judge_approved = bool(verdict.get("aprobado", True))
             judge_reason   = verdict.get("razon", "")
             logger.info("[VALIDATE-PREMIUM] L2 %s nodo %s (confianza=%.2f): %s",
                         "OK" if judge_approved else "FALLO",
                         node_payload.id_nodo_cio,
-                        verdict.get("confianza", 0.0),
-                        judge_reason)
+                        verdict.get("confianza", 0.0), judge_reason)
         except Exception as exc:
             logger.warning("[VALIDATE-PREMIUM] L2 excepción nodo %s: %s — enviando igual",
                            node_payload.id_nodo_cio, exc)
@@ -484,7 +436,6 @@ async def validate_and_send_premium(payload: ValidateAndSendPayload) -> dict[str
             })
             continue
 
-        # ── Envío a CIO (con reintento automático para errores de patcher HTML) ──
         send_kwargs = dict(
             action_id=node_payload.id_nodo_cio,
             template_id=node_payload.template_id,
@@ -494,6 +445,7 @@ async def validate_and_send_premium(payload: ValidateAndSendPayload) -> dict[str
             user_name=payload.user_name or "kepler-auto",
             campaign_name=node_payload.campaign_name,
             semana_label=payload.semana_label,
+            fc=fc,
         )
         sent_ok = False
         send_error: str = ""
@@ -509,7 +461,7 @@ async def validate_and_send_premium(payload: ValidateAndSendPayload) -> dict[str
                 logger.warning("[VALIDATE-PREMIUM] Intento %d falló nodo %s: %s",
                                attempt + 1, node_payload.id_nodo_cio, exc)
                 if attempt == 0:
-                    await asyncio.sleep(1.5)  # breve pausa antes del reintento
+                    await asyncio.sleep(1.5)
 
         if sent_ok:
             results.append({
@@ -534,23 +486,16 @@ async def validate_and_send_premium(payload: ValidateAndSendPayload) -> dict[str
     total_sent  = sum(1 for r in results if r["sent"])
     total_block = sum(1 for r in results if not r["sent"])
     logger.info("[VALIDATE-PREMIUM] Completado: %d enviados, %d bloqueados", total_sent, total_block)
-
-    return {
-        "results":       results,
-        "total_sent":    total_sent,
-        "total_blocked": total_block,
-    }
+    return {"results": results, "total_sent": total_sent, "total_blocked": total_block}
 
 
 @router.post("/execute")
-def execute(body: ExecuteStrategyPayload) -> dict[str, Any]:
-    """
-    Ejecuta la estrategia aprobada en Customer.io.
-    Requiere CUSTOMERIO_APP_API_KEY.
-    Solo llegar acá después de que el usuario aprobó el preview en /generate.
-    """
+def execute(
+    body: ExecuteStrategyPayload,
+    fc: FunnelClient = Depends(get_funnel_client),
+) -> dict[str, Any]:
     try:
-        return execute_strategy(body.strategy)
+        return execute_strategy(body.strategy, fc)
     except RuntimeError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     except Exception as exc:

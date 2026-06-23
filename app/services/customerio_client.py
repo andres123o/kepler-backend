@@ -41,12 +41,7 @@ from typing import Any
 import httpx
 from dotenv import load_dotenv
 
-from app.services.supabase_client import (
-    get_campaigns_cache,
-    get_funnel_steps,
-    get_tracked_campaign_ids,
-    upsert_campaigns_cache,
-)
+from app.services.supabase_client import FunnelClient, _default_fc
 
 load_dotenv(Path(__file__).resolve().parent.parent.parent / ".env")
 
@@ -54,62 +49,41 @@ logger = logging.getLogger("kepler.customerio")
 
 CIO_BASE_URL = "https://api.customer.io/v1"
 
-# ── Token de SOLO LECTURA — sa_live ──────────────────────────────────────────
-# ⚠️  ESTE TOKEN TIENE ACCESO COMPLETO A CIO.
-# ⚠️  SOLO PUEDE USARSE EN GET REQUESTS (_headers_readonly).
-# ⚠️  NUNCA PASARLO A POST / PUT / PATCH / DELETE.
-# Nombre variable: CIO_SA_LIVE_READONLY_KEY  (la palabra READONLY es intencional)
-_CIO_READONLY_KEY: str = os.getenv("CIO_SA_LIVE_READONLY_KEY", "")
-
-# ── Token de ESCRITURA ────────────────────────────────────────────────────────
-# Solo se usa en funciones de escritura, que además requieren CIO_DRY_RUN=false.
-# ⚠️  NUNCA poner aquí el valor de CIO_SA_LIVE_READONLY_KEY.
-_CIO_WRITE_KEY: str = os.getenv("CUSTOMERIO_APP_API_KEY", "")
-
+# ── Flags globales de operación (no son credenciales, no van a org_secrets) ──
 _DRY_RUN: bool = os.getenv("CIO_DRY_RUN", "true").lower() == "true"
 _MAX_OPS = int(os.getenv("CIO_MAX_CAMPAIGNS_PER_EXECUTE", "3"))
-
-# Umbral de spike: si delivered aumentó más de este número entre syncs → alerta.
-# Protege contra el escenario de Juanita (loop de API duplicando base de contactos).
 _SPIKE_THRESHOLD = int(os.getenv("CIO_SPIKE_THRESHOLD", "10000"))
 
-# ── Validación de seguridad al arranque ──────────────────────────────────────
-# Si ambas keys están configuradas y son iguales → error inmediato.
-# El token sa_live nunca debe usarse para escribir.
-if _CIO_READONLY_KEY and _CIO_WRITE_KEY and _CIO_READONLY_KEY == _CIO_WRITE_KEY:
-    raise RuntimeError(
-        "SEGURIDAD CIO: CIO_SA_LIVE_READONLY_KEY y CUSTOMERIO_APP_API_KEY tienen el mismo valor. "
-        "El token sa_live es de SOLO LECTURA — configura una clave de escritura diferente en .env."
-    )
 
-
-def _headers_readonly() -> dict[str, str]:
+def _headers_readonly(key: str) -> dict[str, str]:
     """
     Headers para GET requests usando el token sa_live (SOLO LECTURA).
 
     ⚠️  SOLO llamar desde funciones que hacen GET requests.
     ⚠️  NUNCA usar este header en POST, PUT, PATCH ni DELETE.
+    key: sa_live_key de CIOCredentials (viene de org_secrets via FunnelClient).
     """
-    key = _CIO_READONLY_KEY or _CIO_WRITE_KEY  # fallback si solo hay una key configurada
     if not key:
         raise RuntimeError(
-            "CIO_SA_LIVE_READONLY_KEY no configurada en .env. "
-            "Agrega el token sa_live de CIO para habilitar lectura."
+            "CIO_SA_LIVE_KEY no disponible. "
+            "Agrega la credencial en org_secrets para esta organización."
         )
     return {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
 
 
-def _headers_write() -> dict[str, str]:
+def _headers_write(key: str) -> dict[str, str]:
     """
     Headers para operaciones de escritura (POST/PUT).
     Solo llamar DESPUÉS de _guard_write() — que ya bloquea si DRY_RUN=true.
 
-    ⚠️  NUNCA usar _CIO_READONLY_KEY aquí.
-    ⚠️  La validación de arranque ya rechaza keys iguales, pero no confundas las funciones.
+    ⚠️  NUNCA pasar el sa_live_key aquí — solo el app_api_key.
+    key: app_api_key de CIOCredentials (viene de org_secrets via FunnelClient).
     """
-    key = _CIO_WRITE_KEY or _CIO_READONLY_KEY  # fallback solo en dev sin write key
     if not key:
-        raise RuntimeError("CUSTOMERIO_APP_API_KEY no configurada en .env")
+        raise RuntimeError(
+            "CIO_APP_API_KEY no disponible. "
+            "Agrega la credencial en org_secrets para esta organización."
+        )
     return {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
 
 
@@ -122,11 +96,12 @@ def _guard_write(operation: str, detail: str = "") -> None:
     logger.info("CIO WRITE: %s %s", operation, detail)
 
 
-def get_campaign(campaign_id: str | int) -> dict[str, Any]:
+def get_campaign(campaign_id: str | int, fc) -> dict[str, Any]:
     """Obtiene detalle de una campaña por ID. Solo lectura — usa token sa_live."""
+    creds = fc.get_cio_credentials()
     resp = httpx.get(
         f"{CIO_BASE_URL}/campaigns/{campaign_id}",
-        headers=_headers_readonly(),  # ⚠️ READONLY TOKEN — solo GET
+        headers=_headers_readonly(creds.sa_live_key),
         timeout=30,
     )
     resp.raise_for_status()
@@ -134,12 +109,13 @@ def get_campaign(campaign_id: str | int) -> dict[str, Any]:
     return data.get("campaign", data)
 
 
-def get_campaign_actions_full(campaign_id: str | int) -> list[dict[str, Any]]:
+def get_campaign_actions_full(campaign_id: str | int, fc) -> list[dict[str, Any]]:
     """
     GET /v1/campaigns/{id}/actions — paginates through all pages to return every action
     with content (subject, body included). The endpoint uses cursor-based pagination via
     the 'next' key; without pagination we only get the first 10 actions.
     """
+    creds = fc.get_cio_credentials()
     all_actions: list[dict[str, Any]] = []
     params: dict[str, str] = {}
     page = 0
@@ -147,7 +123,7 @@ def get_campaign_actions_full(campaign_id: str | int) -> list[dict[str, Any]]:
     while True:
         resp = httpx.get(
             f"{CIO_BASE_URL}/campaigns/{campaign_id}/actions",
-            headers=_headers_readonly(),  # ⚠️ READONLY TOKEN — solo GET
+            headers=_headers_readonly(creds.sa_live_key),
             params=params,
             timeout=30,
         )
@@ -159,14 +135,14 @@ def get_campaign_actions_full(campaign_id: str | int) -> list[dict[str, Any]]:
             break
         params = {"start": next_cursor}
         page += 1
-        if page > 20:  # safety: never loop forever
+        if page > 20:
             logger.warning("get_campaign_actions_full: more than 20 pages for campaign %s, stopping", campaign_id)
             break
 
     return all_actions
 
 
-def get_campaign_nodes_with_content(campaign_id: str | int) -> list[dict[str, Any]]:
+def get_campaign_nodes_with_content(campaign_id: str | int, fc) -> list[dict[str, Any]]:
     """
     Obtiene los nodos de mensaje de una campaña con su contenido completo.
     Usa GET /v1/campaigns/{id}/actions que retorna subject y body reales.
@@ -175,7 +151,7 @@ def get_campaign_nodes_with_content(campaign_id: str | int) -> list[dict[str, An
     """
     import re
 
-    actions = get_campaign_actions_full(campaign_id)
+    actions = get_campaign_actions_full(campaign_id, fc)
     logger.info("CIO get_campaign_nodes_with_content: campaña=%s → %d actions totales",
                 campaign_id, len(actions))
 
@@ -218,18 +194,20 @@ def get_campaign_nodes_with_content(campaign_id: str | int) -> list[dict[str, An
     return nodes
 
 
-def create_campaign(config: dict[str, Any]) -> dict[str, Any]:
+def create_campaign(config: dict[str, Any], fc) -> dict[str, Any]:
     """
     Crea una nueva campaña en CIO. Bloqueado si CIO_DRY_RUN=true.
     Verifica que no exista ya una running con el mismo trigger.
+    fc: FunnelClient — lee credenciales CIO desde org_secrets.
     """
     _guard_write("create_campaign", config.get("name", ""))
+    creds = fc.get_cio_credentials()
 
     trigger = config.get("event_name", "") or config.get("event", "")
     if trigger:
-        for cid in get_tracked_campaign_ids():
+        for cid in fc.get_tracked_campaign_ids():
             try:
-                c = get_campaign(cid)
+                c = get_campaign(cid, fc)
                 existing_trigger = c.get("event_name") or c.get("event") or ""
                 if existing_trigger == trigger and c.get("state") == "running":
                     raise RuntimeError(
@@ -241,7 +219,7 @@ def create_campaign(config: dict[str, Any]) -> dict[str, Any]:
 
     resp = httpx.post(
         f"{CIO_BASE_URL}/campaigns",
-        headers=_headers_write(),  # ⚠️ WRITE TOKEN — protegido por _guard_write() arriba
+        headers=_headers_write(creds.app_api_key),
         json={"campaign": config},
         timeout=60,
     )
@@ -251,12 +229,13 @@ def create_campaign(config: dict[str, Any]) -> dict[str, Any]:
     return campaign
 
 
-def add_action(campaign_id: str | int, action: dict[str, Any]) -> dict[str, Any]:
+def add_action(campaign_id: str | int, action: dict[str, Any], fc) -> dict[str, Any]:
     """Agrega un nodo/acción a una campaña. Bloqueado si DRY_RUN."""
     _guard_write("add_action", f"campaign={campaign_id} type={action.get('type')}")
+    creds = fc.get_cio_credentials()
     resp = httpx.post(
         f"{CIO_BASE_URL}/campaigns/{campaign_id}/actions",
-        headers=_headers_write(),  # ⚠️ WRITE TOKEN — protegido por _guard_write() arriba
+        headers=_headers_write(creds.app_api_key),
         json={"action": action},
         timeout=30,
     )
@@ -268,15 +247,16 @@ def add_action(campaign_id: str | int, action: dict[str, Any]) -> dict[str, Any]
 
 
 def add_edge(campaign_id: str | int, from_id: str, to_id: str,
-             edge_type: str = "continue", index: int | None = None) -> dict[str, Any]:
+             fc=None, edge_type: str = "continue", index: int | None = None) -> dict[str, Any]:
     """Conecta dos nodos. Bloqueado si DRY_RUN."""
     _guard_write("add_edge", f"campaign={campaign_id} {from_id}->{to_id}")
+    creds = fc.get_cio_credentials()
     edge: dict[str, Any] = {"from": from_id, "to": to_id, "type": edge_type}
     if index is not None:
         edge["index"] = index
     resp = httpx.post(
         f"{CIO_BASE_URL}/campaigns/{campaign_id}/edges",
-        headers=_headers_write(),  # ⚠️ WRITE TOKEN — protegido por _guard_write() arriba
+        headers=_headers_write(creds.app_api_key),
         json={"edge": edge},
         timeout=30,
     )
@@ -285,12 +265,13 @@ def add_edge(campaign_id: str | int, from_id: str, to_id: str,
 
 
 def update_action(campaign_id: str | int, action_id: str,
-                  updates: dict[str, Any]) -> dict[str, Any]:
+                  updates: dict[str, Any], fc=None) -> dict[str, Any]:
     """Actualiza copy/subject de un nodo existente. Bloqueado si DRY_RUN."""
     _guard_write("update_action", f"campaign={campaign_id} action={action_id}")
+    creds = fc.get_cio_credentials()
     resp = httpx.put(
         f"{CIO_BASE_URL}/campaigns/{campaign_id}/actions/{action_id}",
-        headers=_headers_write(),  # ⚠️ WRITE TOKEN — protegido por _guard_write() arriba
+        headers=_headers_write(creds.app_api_key),
         json={"action": updates},
         timeout=30,
     )
@@ -298,12 +279,13 @@ def update_action(campaign_id: str | int, action_id: str,
     return resp.json().get("action", {})
 
 
-def activate_campaign(campaign_id: str | int) -> dict[str, Any]:
+def activate_campaign(campaign_id: str | int, fc=None) -> dict[str, Any]:
     """Activa una campaña draft → running. Bloqueado si DRY_RUN."""
     _guard_write("activate_campaign", f"campaign={campaign_id}")
+    creds = fc.get_cio_credentials()
     resp = httpx.put(
         f"{CIO_BASE_URL}/campaigns/{campaign_id}",
-        headers=_headers_write(),  # ⚠️ WRITE TOKEN — protegido por _guard_write() arriba
+        headers=_headers_write(creds.app_api_key),
         json={"campaign": {"state": "running"}},
         timeout=30,
     )
@@ -313,7 +295,7 @@ def activate_campaign(campaign_id: str | int) -> dict[str, Any]:
 
 # ─── Métricas ────────────────────────────────────────────────────────────────
 
-def get_campaign_metrics(campaign_id: str | int, weeks: int = 8) -> dict[str, Any]:
+def get_campaign_metrics(campaign_id: str | int, fc, weeks: int = 8) -> dict[str, Any]:
     """
     Obtiene métricas de entrega detalladas via App API metrics endpoint.
     Devuelve totales de las últimas N semanas completas + serie semanal para tendencias.
@@ -327,9 +309,10 @@ def get_campaign_metrics(campaign_id: str | int, weeks: int = 8) -> dict[str, An
       - bounced / undeliverable → calidad de audiencia
     """
     try:
+        creds = fc.get_cio_credentials()
         resp = httpx.get(
             f"{CIO_BASE_URL}/campaigns/{campaign_id}/metrics",
-            headers=_headers_readonly(),  # ⚠️ READONLY TOKEN — solo GET
+            headers=_headers_readonly(creds.sa_live_key),
             params={"period": "weeks", "steps": weeks},
             timeout=30,
         )
@@ -395,28 +378,11 @@ def get_campaign_metrics(campaign_id: str | int, weeks: int = 8) -> dict[str, An
 
 # ─── Sincronización ───────────────────────────────────────────────────────────
 
-# Waypoints de CIO que no son entry_events del modelo pero sí se usan como triggers.
-# Photo_Validation_Completed es una frontera práctica entre fotos (steps 5-6) y video+revisión
-# (steps 7-8). Los eventos granulares de foto no son confiables en CIO, así que Juanita usa
-# este waypoint como goal de C4 / trigger de C5.
-_CIO_WAYPOINT_STEP_MAP: dict[str, str] = {
-    "photo_validation_completed": "step_06_back_photo",
-}
-
-# La API de CIO no devuelve conversion_event_name en el detalle de campaña.
-# Este mapa define el goal esperado de cada trigger conocido del funnel Trii como fallback.
-_TRIGGER_TO_GOAL_FALLBACK: dict[str, str] = {
-    "user_created":                          "basic_data_completed",
-    "basic_data_completed":                  "risk_profile_completed",
-    "risk_profile_completed":                "data_validation_information_completed",
-    "data_validation_information_completed": "photo_validation_completed",
-    "photo_validation_completed":            "befullusercreated",
-    "befullusercreated":                     "becashin",
-}
-
-
-def _map_to_funnel_step(campaign: dict[str, Any],
-                        funnel_steps: list[dict[str, Any]]) -> str | None:
+def _map_to_funnel_step(
+    campaign: dict[str, Any],
+    funnel_steps: list[dict[str, Any]],
+    waypoint_step_map: dict[str, str] | None = None,
+) -> str | None:
     trigger = (campaign.get("event_name") or campaign.get("event") or "").strip()
     trigger_lower = trigger.lower()
 
@@ -426,22 +392,33 @@ def _map_to_funnel_step(campaign: dict[str, Any],
         if entry and entry == trigger_lower:
             return step["step_code"]
 
-    # Waypoints CIO que no son entry_events del modelo (ej. photo_validation_completed).
-    if trigger_lower in _CIO_WAYPOINT_STEP_MAP:
-        return _CIO_WAYPOINT_STEP_MAP[trigger_lower]
+    # Waypoints CIO que no son entry_events del modelo — desde config del funnel.
+    wm = waypoint_step_map or {}
+    if trigger_lower in wm:
+        return wm[trigger_lower]
 
     return None
 
 
-def sync_campaigns_to_supabase() -> dict[str, Any]:
+def sync_campaigns_to_supabase(fc: FunnelClient) -> dict[str, Any]:
     """
-    Descarga las 5 campañas del funnel, captura métricas detalladas y detecta spikes.
+    Descarga las campañas del funnel, captura métricas detalladas y detecta spikes.
     Hace 2 llamadas GET por campaña: detalle (estado/trigger) + métricas (tasas/series).
     Sin escrituras a CIO.
+    fc: FunnelClient requerido — sin fallback a tenant default.
     """
-    funnel_steps = get_funnel_steps()
+    funnel_steps = fc.get_funnel_steps()
 
-    campaign_ids = get_tracked_campaign_ids()
+    # Leer mapas CIO desde config del funnel
+    try:
+        cio_cfg = fc.get_cio_config()
+        waypoint_step_map    = {k.lower(): v for k, v in (cio_cfg.get("waypoint_step_map") or {}).items()}
+        trigger_to_goal_map  = {k.lower(): v for k, v in (cio_cfg.get("trigger_to_goal_map") or {}).items()}
+    except ValueError:
+        waypoint_step_map   = {}
+        trigger_to_goal_map = {}
+
+    campaign_ids = fc.get_tracked_campaign_ids()
     if not campaign_ids:
         return {
             "total_synced": 0, "mapped_to_funnel": 0, "unmapped": 0,
@@ -450,7 +427,7 @@ def sync_campaigns_to_supabase() -> dict[str, Any]:
         }
 
     # Leer cache previo para calcular delta de delivered (detección de spike)
-    prev_cache = {c["cio_campaign_id"]: c for c in get_campaigns_cache()}
+    prev_cache = {c["cio_campaign_id"]: c for c in fc.get_campaigns_cache()}
 
     rows: list[dict[str, Any]] = []
     errors: list[str] = []
@@ -458,11 +435,11 @@ def sync_campaigns_to_supabase() -> dict[str, Any]:
 
     for cid in campaign_ids:
         try:
-            c = get_campaign(cid)          # estado, tipo, trigger, goal
-            m = get_campaign_metrics(cid, weeks=4)  # métricas del último mes (4 semanas completas)
+            c = get_campaign(cid, fc)
+            m = get_campaign_metrics(cid, fc, weeks=4)
 
             cid_str = str(c.get("id", cid))
-            step_mapped = _map_to_funnel_step(c, funnel_steps)
+            step_mapped = _map_to_funnel_step(c, funnel_steps, waypoint_step_map)
 
             # Extraer subjects/preheader/body de nodos mensaje — ya vienen en el objeto campaña
             actions = c.get("actions", [])
@@ -487,7 +464,7 @@ def sync_campaigns_to_supabase() -> dict[str, Any]:
             # Fetch full actions (paginated) to count message nodes
             # Note: CIO App API does NOT expose delay/wait node durations — only message actions
             try:
-                full_actions = get_campaign_actions_full(cid)
+                full_actions = get_campaign_actions_full(cid, fc)
                 n_nodos = sum(1 for a in full_actions if a.get("type") in ("push", "email"))
             except Exception as exc:
                 logger.warning("No se pudo obtener full actions para %s: %s", cid, exc)
@@ -519,15 +496,14 @@ def sync_campaigns_to_supabase() -> dict[str, Any]:
                 "status":               c.get("state"),
                 "trigger_event":        c.get("event_name") or c.get("event"),
                 # CIO App API never returns conversion_event_name in campaign detail.
-                # Priority: CIO value → previous sync value → hardcoded funnel fallback.
+                # Priority: CIO value → previous sync value → funnel config fallback map.
                 "goal_event":           (
                     c.get("conversion_event_name") or c.get("goal_event")
                     or prev.get("goal_event")
-                    or _TRIGGER_TO_GOAL_FALLBACK.get(
+                    or trigger_to_goal_map.get(
                         (c.get("event_name") or c.get("event") or "").lower()
                     )
                 ),
-                "country":              "co",
                 "funnel_step_mapped":   step_mapped,
                 # Métricas de entrega (App API metrics endpoint — últimas 8 semanas completas)
                 "delivered":            m["delivered"],
@@ -559,7 +535,7 @@ def sync_campaigns_to_supabase() -> dict[str, Any]:
             logger.warning("No se pudo obtener campaña %s: %s", cid, exc)
             errors.append(str(cid))
 
-    count = upsert_campaigns_cache(rows)
+    count = fc.upsert_campaigns_cache(rows)
     mapped = sum(1 for r in rows if r["funnel_step_mapped"])
 
     logger.info(

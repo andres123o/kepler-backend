@@ -1,17 +1,9 @@
 from typing import Any
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
-from app.services.supabase_client import (
-    add_tracked_campaign,
-    delete_tracked_campaign,
-    delete_knowledge_base_entry,
-    get_all_knowledge_base,
-    get_campaigns_cache,
-    insert_knowledge_base_entry,
-    update_knowledge_base_entry,
-)
+from app.services.supabase_client import FunnelClient, get_funnel_client
 
 router = APIRouter()
 
@@ -33,9 +25,9 @@ class AddKBPayload(BaseModel):
 
 
 @router.get("/tracked-campaigns")
-def list_tracked_campaigns() -> list[dict[str, Any]]:
+def list_tracked_campaigns(fc: FunnelClient = Depends(get_funnel_client)) -> list[dict[str, Any]]:
     try:
-        campaigns = get_campaigns_cache()
+        campaigns = fc.get_campaigns_cache()
         return [
             {
                 "cio_campaign_id": c["cio_campaign_id"],
@@ -60,61 +52,61 @@ def list_tracked_campaigns() -> list[dict[str, Any]]:
 
 
 @router.post("/tracked-campaigns")
-def add_campaign(body: AddCampaignPayload) -> dict[str, Any]:
+def add_campaign(body: AddCampaignPayload, fc: FunnelClient = Depends(get_funnel_client)) -> dict[str, Any]:
     cid = body.cio_campaign_id.strip()
     if not cid.isdigit():
         raise HTTPException(status_code=422, detail="El ID de campaña debe ser numérico")
     try:
-        return add_tracked_campaign(cid)
+        return fc.add_tracked_campaign(cid)
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
 @router.delete("/tracked-campaigns/{campaign_id}")
-def remove_campaign(campaign_id: str) -> dict[str, Any]:
+def remove_campaign(campaign_id: str, fc: FunnelClient = Depends(get_funnel_client)) -> dict[str, Any]:
     try:
-        delete_tracked_campaign(campaign_id)
+        fc.delete_tracked_campaign(campaign_id)
         return {"ok": True, "deleted": campaign_id}
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
 @router.get("/knowledge-base")
-def list_knowledge_base() -> list[dict[str, Any]]:
+def list_knowledge_base(fc: FunnelClient = Depends(get_funnel_client)) -> list[dict[str, Any]]:
     try:
-        return get_all_knowledge_base()
+        return fc.get_all_knowledge_base()
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
 @router.post("/knowledge-base")
-def add_kb_entry(body: AddKBPayload) -> dict[str, Any]:
+def add_kb_entry(body: AddKBPayload, fc: FunnelClient = Depends(get_funnel_client)) -> dict[str, Any]:
     tipo = body.tipo.strip().upper()
     titulo = body.titulo.strip()
     contenido = body.contenido.strip()
     if not tipo or not titulo or not contenido:
         raise HTTPException(status_code=422, detail="tipo, titulo y contenido son obligatorios")
     try:
-        return insert_knowledge_base_entry(tipo, titulo, contenido)
+        return fc.insert_knowledge_base_entry(tipo, titulo, contenido)
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
 @router.delete("/knowledge-base/{entry_id}")
-def delete_kb_entry(entry_id: str) -> dict[str, Any]:
+def delete_kb_entry(entry_id: str, fc: FunnelClient = Depends(get_funnel_client)) -> dict[str, Any]:
     try:
-        delete_knowledge_base_entry(entry_id)
+        fc.delete_knowledge_base_entry(entry_id)
         return {"ok": True, "deleted": entry_id}
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
 @router.put("/knowledge-base/{entry_id}")
-def update_kb_entry(entry_id: str, body: UpdateKBPayload) -> dict[str, Any]:
+def update_kb_entry(entry_id: str, body: UpdateKBPayload, fc: FunnelClient = Depends(get_funnel_client)) -> dict[str, Any]:
     updates = {k: v for k, v in body.model_dump().items() if v is not None}
     if not updates:
         raise HTTPException(status_code=422, detail="No hay campos para actualizar")
     try:
-        return update_knowledge_base_entry(entry_id, updates)
+        return fc.update_knowledge_base_entry(entry_id, updates)
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc

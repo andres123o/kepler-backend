@@ -1,96 +1,51 @@
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, Query
-from pydantic import BaseModel
+from fastapi import APIRouter, Depends, HTTPException, Query
+from pydantic import BaseModel, ConfigDict
 
-from app.services.supabase_client import (
-    append_to_master,
-    clear_ultima_semana,
-    get_master_df,
-    get_ultima_semana_row,
-    save_ultima_semana,
-)
+from app.services.supabase_client import FunnelClient, get_funnel_client
 
 router = APIRouter()
 
 
-class UltimaSemanaPaylod(BaseModel):
+class IngestionPayload(BaseModel):
+    model_config = ConfigDict(extra="allow")
     semana: str
-    # Funnel KYC
-    step_09_full_account: int | None = None
-    tasa_basic_a_risk: float | None = None
-    tasa_risk_a_fulldata: float | None = None
-    tasa_fulldata_a_video: float | None = None
-    tasa_video_a_review: float | None = None
-    pct_perfil_conservador: float | None = None
-    pct_perfil_arriesgado: float | None = None
-    full_users_aprobados: int | None = None
-    usuarios_primer_cashin: int | None = None
-    # Macro
-    trm: float | None = None
-    sp500_cambio_semanal_pct: float | None = None
-    brent_cambio_semanal_pct: float | None = None
-    colcap_cambio_semanal_pct: float | None = None
-    spread_tes_banrep: float | None = None
-    trends_cdt: float | None = None
-    trends_acciones: float | None = None
-    pct_dias_quincena: float | None = None
-    # Metadata
-    es_exogeno: int | None = None
 
 
 @router.get("/ultima-semana")
-def read_ultima_semana() -> dict[str, Any]:
-    """Devuelve la fila actual de ultima_semana (nombres Supabase)."""
-    row = get_ultima_semana_row()
-    if row is None:
-        return {}
-    return row
+def read_ultima_semana(fc: FunnelClient = Depends(get_funnel_client)) -> dict[str, Any]:
+    row = fc.get_ultima_semana_row()
+    return row or {}
 
 
 @router.post("/ultima-semana")
-def write_ultima_semana(body: UltimaSemanaPaylod) -> dict[str, Any]:
-    """Reemplaza ultima_semana con los datos de la semana nueva."""
+def write_ultima_semana(body: IngestionPayload, fc: FunnelClient = Depends(get_funnel_client)) -> dict[str, Any]:
     payload = {k: v for k, v in body.model_dump().items() if v is not None}
     try:
-        saved = save_ultima_semana(payload)
+        return fc.save_ultima_semana(payload)
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
-    return saved
 
 
 @router.post("/ultima-semana/confirmar")
-def confirmar_semana(body: UltimaSemanaPaylod) -> dict[str, Any]:
-    """
-    Cierra la semana: copia ultima_semana a master_consolidado_final.
-    Llamar después de que se haya corrido la predicción y los datos estén OK.
-    """
+def confirmar_semana(body: IngestionPayload, fc: FunnelClient = Depends(get_funnel_client)) -> dict[str, Any]:
     payload = {k: v for k, v in body.model_dump().items() if v is not None}
     try:
-        saved = append_to_master(payload)
+        return fc.append_to_master(payload)
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
-    return saved
 
 
 @router.post("/nueva-proyeccion")
-def nueva_proyeccion() -> dict[str, Any]:
-    """
-    Flujo del domingo:
-    1. Lee ultima_semana
-    2. Copia esa fila a master_consolidado_final
-    3. Borra ultima_semana (deja la tabla lista para la semana nueva)
-    """
-    row = get_ultima_semana_row()
+def nueva_proyeccion(fc: FunnelClient = Depends(get_funnel_client)) -> dict[str, Any]:
+    row = fc.get_ultima_semana_row()
     if not row:
-        raise HTTPException(
-            status_code=422,
-            detail="ultima_semana está vacía. No hay datos para archivar.",
-        )
+        raise HTTPException(status_code=422, detail="ultima_semana está vacía. No hay datos para archivar.")
     semana_archivada = row.get("semana", "")
     try:
-        append_to_master({k: v for k, v in row.items() if k != "id"})
-        clear_ultima_semana()
+        fc.append_to_master({k: v for k, v in row.items() if k != "id"})
+        fc.clear_ultima_semana()
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
     return {"ok": True, "semana_archivada": semana_archivada}
@@ -98,31 +53,21 @@ def nueva_proyeccion() -> dict[str, Any]:
 
 @router.get("/auto-variables")
 def get_auto_variables(
-    semana: str = Query(..., description="Fecha de inicio de la semana (DD/MM/YYYY o YYYY-MM-DD)"),
-    banrep_tasa: float | None = Query(None, description="Tasa intervención BanRep en % (ej. 10.25). Requerida para calcular spread_tes_banrep."),
+    semana: str = Query(...),
+    banrep_tasa: float | None = Query(None),
+    fc: FunnelClient = Depends(get_funnel_client),
 ) -> dict[str, Any]:
-    """
-    Obtiene automáticamente las variables macro para la semana dada.
-
-    Fuentes:
-      - pct_dias_quincena        : cálculo puro (~inmediato)
-      - trm                      : datos.gov.co Superfinanciera (promedio 7 días lun-dom)
-      - colcap, sp500, brent     : TradingView / yfinance (~1-3s)
-      - spread_tes_banrep        : TVC:CO10Y (TradingView) − banrep_tasa (si se provee)
-      - trends_cdt, trends_acc   : Google Trends (~35-60s — incluye pausa 30s anti-429)
-    """
     from app.services.market_data_fetcher import fetch_auto_variables
     try:
-        return fetch_auto_variables(semana, banrep_tasa=banrep_tasa)
+        return fetch_auto_variables(semana, banrep_tasa=banrep_tasa, fc=fc)
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
 @router.get("/master")
-def read_master(limit: int = 20) -> list[dict[str, Any]]:
-    """Devuelve las últimas N filas de master_consolidado_final."""
+def read_master(limit: int = 20, fc: FunnelClient = Depends(get_funnel_client)) -> list[dict[str, Any]]:
     try:
-        df = get_master_df()
+        df = fc.get_master_df()
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
     if df.empty:

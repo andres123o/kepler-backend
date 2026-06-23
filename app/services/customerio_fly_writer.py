@@ -19,9 +19,7 @@ from typing import Any
 import httpx
 
 from app.services.customerio_fly_client import (
-    _ENV_ID,
     _FLY_BASE,
-    _jwt_cache,
     _refresh_jwt,
 )
 
@@ -36,17 +34,16 @@ def _strip_wsc(s: str) -> str:
     return re.sub(r"-%}", "%}", re.sub(r"\{%-", "{%", s))
 
 
-def _fly_put(path: str, payload: dict[str, Any]) -> dict[str, Any]:
+def _fly_put(path: str, payload: dict[str, Any], sa_token: str = "") -> dict[str, Any]:
     """PUT autenticado via JWT. Renueva el token en 401 (una vez)."""
-    jwt = _refresh_jwt()
+    jwt = _refresh_jwt(sa_token)
     headers = {"Authorization": f"Bearer {jwt}", "Content-Type": "application/json"}
 
     resp = httpx.put(f"{_FLY_BASE}{path}", headers=headers, json=payload, timeout=30)
 
     if resp.status_code == 401:
         logger.info("CIO fly writer: JWT expirado, renovando...")
-        _jwt_cache["token"] = ""
-        jwt = _refresh_jwt()
+        jwt = _refresh_jwt(sa_token, force=True)
         headers["Authorization"] = f"Bearer {jwt}"
         resp = httpx.put(f"{_FLY_BASE}{path}", headers=headers, json=payload, timeout=30)
 
@@ -66,21 +63,6 @@ def _fly_put(path: str, payload: dict[str, Any]) -> dict[str, Any]:
 
     return resp.json()
 
-
-def _fly_get(path: str) -> dict[str, Any]:
-    """GET autenticado — reutiliza el JWT cacheado."""
-    jwt = _refresh_jwt()
-    headers = {"Authorization": f"Bearer {jwt}", "Content-Type": "application/json"}
-    resp = httpx.get(f"{_FLY_BASE}{path}", headers=headers, timeout=30)
-
-    if resp.status_code == 401:
-        _jwt_cache["token"] = ""
-        jwt = _refresh_jwt()
-        headers["Authorization"] = f"Bearer {jwt}"
-        resp = httpx.get(f"{_FLY_BASE}{path}", headers=headers, timeout=30)
-
-    resp.raise_for_status()
-    return resp.json()
 
 
 _LIQUID_RE = re.compile(r"\{%-?.*?-?%\}|\{\{.*?\}\}", re.DOTALL)
@@ -290,6 +272,7 @@ def update_node_copy(
     user_name: str | None = None,
     campaign_name: str | None = None,
     semana_label: str | None = None,
+    fc=None,
 ) -> dict[str, Any]:
     """
     Actualiza el copy de un nodo (push o email) en CIO.
@@ -299,6 +282,7 @@ def update_node_copy(
       2. PUT /templates/{template_id}  → escribir solo subject/body/preheader
 
     Cooldown: si el mismo action_id fue actualizado hace < 30s → RuntimeError (429).
+    fc: FunnelClient para el audit log en node_update_log. Requerido para multi-tenant.
     """
     now = time.monotonic()
     last = _last_update.get(action_id, 0.0)
@@ -309,8 +293,17 @@ def update_node_copy(
         )
 
     # 1. Leer template completo (necesario para no borrar otros campos al hacer PUT)
+    if fc is None:
+        raise RuntimeError(
+            "update_node_copy requiere fc (FunnelClient) para obtener credenciales CIO."
+        )
+    creds = fc.get_cio_credentials()
+    from app.services.customerio_fly_client import _fly_get
     logger.info("CIO fly writer: GET template %s (action %s)", template_id, action_id)
-    tmpl_data = _fly_get(f"/v1/environments/{_ENV_ID}/templates/{template_id}")
+    tmpl_data = _fly_get(
+        f"/v1/environments/{creds.environment_id}/templates/{template_id}",
+        sa_token=creds.sa_live_key,
+    )
     tmpl = tmpl_data.get("template", tmpl_data)
 
     # 2. Strip whitespace control en todos los campos — CIO no acepta {%- -%} en ninguno.
@@ -337,17 +330,17 @@ def update_node_copy(
 
     logger.info("CIO fly writer: PUT template %s (action %s)", template_id, action_id)
     _fly_put(
-        f"/v1/environments/{_ENV_ID}/templates/{template_id}",
+        f"/v1/environments/{creds.environment_id}/templates/{template_id}",
         {"template": tmpl_updated},
+        sa_token=creds.sa_live_key,
     )
 
     # Registrar timestamp del update exitoso para el cooldown
     _last_update[action_id] = time.monotonic()
 
-    # Log de auditoría: quién actualizó este nodo
-    if user_name:
-        from app.services.supabase_client import log_node_update
-        log_node_update(user_name, campaign_name, action_id, semana_label)
+    # Log de auditoría: quién actualizó este nodo (scoped al tenant via fc)
+    if user_name and fc is not None:
+        fc.log_node_update(user_name, campaign_name, action_id, semana_label)
 
     logger.info("CIO fly writer: nodo %s actualizado correctamente (user=%s)", action_id, user_name or "anon")
     return {
