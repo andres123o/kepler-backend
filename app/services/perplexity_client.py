@@ -12,7 +12,7 @@ API key: PERPLEXITY_API_KEY (.env).
 
 import logging
 import os
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -150,6 +150,14 @@ def fetch_market_research(
     _fecha_hoy = fecha_hoy or date.today()
     _today_str = _fecha_hoy.strftime("%Y-%m-%d")
     query = _re.sub(r'Fecha de hoy:[^\n]*', f'Fecha de hoy: {_today_str}.', query)
+    if semana_label:
+        query = _re.sub(r'Semana objetivo:[^\n]*', f'Semana objetivo: {semana_label}.', query)
+    # Reemplazar cualquier rango DD/MM/YYYY al DD/MM/YYYY hardcodeado en el cuerpo
+    # con los últimos 7 días desde hoy — nunca hardcode en Supabase ni en código
+    _rango_inicio = (_fecha_hoy - timedelta(days=7)).strftime("%d/%m/%Y")
+    _rango_fin    = _fecha_hoy.strftime("%d/%m/%Y")
+    _ultimo_rango = f"{_rango_inicio} al {_rango_fin}"
+    query = _re.sub(r'\d{2}/\d{2}/\d{4}\s+al\s+\d{2}/\d{2}/\d{4}', _ultimo_rango, query)
 
     payload = {
         **base_params,
