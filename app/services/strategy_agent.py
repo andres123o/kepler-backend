@@ -447,6 +447,35 @@ def get_funnel_health(fc: FunnelClient) -> list[dict[str, Any]]:
                 )
             return w
 
+        def _campaign_dict(c: dict, step_name: str | None, step_code: str | None, exit_event: str | None) -> dict:
+            return {
+                "cio_campaign_id":     c["cio_campaign_id"],
+                "name":                c["name"],
+                "status":              c.get("status"),
+                "funnel_step_name":    step_name,
+                "funnel_step_code":    step_code,
+                "goal_event":          c.get("goal_event") or exit_event,
+                "delivery_rate":       c.get("delivery_rate") or 0.0,
+                "open_rate":           c.get("open_rate") or 0.0,
+                "conversion_rate":     c.get("conversion_rate") or 0.0,
+                "delivered":           c.get("delivered") or 0,
+                "total_sent":          c.get("total_sent") or 0,
+                "converted":           c.get("converted") or 0,
+                "undeliverable":       c.get("undeliverable") or 0,
+                "human_opened":        c.get("human_opened") or 0,
+                "clicked":             c.get("clicked") or 0,
+                "spike_alert":         bool(c.get("spike_alert")),
+                "last_synced_at":      c.get("last_synced_at"),
+                "metrics_weekly_json": c.get("metrics_weekly_json"),
+                "n_nodos":             _get_n_nodos(c),
+                "node_list":           [
+                    {"id": n.get("id"), "type": n.get("type"), "name": n.get("name") or ""}
+                    for n in ((c.get("nodes_json") or {}).get("nodes") or [])
+                    if n.get("type") in ("email_action", "push_notification_action")
+                ],
+                "warnings":            _camp_warnings(c),
+            }
+
         result.append({
             "step_order":    step["step_order"],
             "step_code":     code,
@@ -466,37 +495,45 @@ def get_funnel_health(fc: FunnelClient) -> list[dict[str, Any]]:
                 "delivery_delta":  total_delta,
             },
             "campaigns": [
-                {
-                    "cio_campaign_id":     c["cio_campaign_id"],
-                    "name":                c["name"],
-                    "status":              c.get("status"),
-                    "funnel_step_name":    step["step_name"],
-                    "funnel_step_code":    code,
-                    "goal_event":          c.get("goal_event") or step.get("exit_event"),
-                    "delivery_rate":       c.get("delivery_rate") or 0.0,
-                    "open_rate":           c.get("open_rate") or 0.0,
-                    "conversion_rate":     c.get("conversion_rate") or 0.0,
-                    "delivered":           c.get("delivered") or 0,
-                    "total_sent":          c.get("total_sent") or 0,
-                    "converted":           c.get("converted") or 0,
-                    "undeliverable":       c.get("undeliverable") or 0,
-                    "human_opened":        c.get("human_opened") or 0,
-                    "clicked":             c.get("clicked") or 0,
-                    "spike_alert":         bool(c.get("spike_alert")),
-                    "last_synced_at":      c.get("last_synced_at"),
-                    "metrics_weekly_json": c.get("metrics_weekly_json"),
-                    "n_nodos":             _get_n_nodos(c),
-                    "node_list":           [
-                        {"id": n.get("id"), "type": n.get("type"), "name": n.get("name") or ""}
-                        for n in ((c.get("nodes_json") or {}).get("nodes") or [])
-                        if n.get("type") in ("email_action", "push_notification_action")
-                    ],
-                    "warnings":            _camp_warnings(c),
-                }
+                _campaign_dict(c, step_name=step["step_name"], step_code=code, exit_event=step.get("exit_event"))
                 for c in step_campaigns
             ],
             "entry_event": step.get("entry_event"),
             "exit_event":  step.get("exit_event"),
+        })
+
+    # ── Campañas activas sin funnel_step_mapped ──────────────────────────────
+    # No se descartan: sin esto, una campaña real y corriendo desaparece por
+    # completo de esta vista solo porque el mapeo trigger→step no calzó.
+    mapped_ids = {c["cio_campaign_id"] for step_campaigns in step_map.values() for c in step_campaigns}
+    unmapped = [c for c in campaigns if c["cio_campaign_id"] not in mapped_ids]
+    if unmapped:
+        n_camp = len(unmapped)
+        camp_str = "campaña" if n_camp == 1 else "campañas"
+        result.append({
+            "step_order":    len(funnel_steps) + 1,
+            "step_code":     None,
+            "step_name":     "Sin paso mapeado",
+            "health":        "amarillo",
+            "label":         f"{n_camp} {camp_str} activa{'s' if n_camp != 1 else ''} sin paso de funnel asociado — revisá el mapeo trigger→step",
+            "warnings":      [],
+            "metrics": {
+                "delivered":       sum(c.get("delivered") or 0 for c in unmapped),
+                "total_sent":      sum(c.get("total_sent") or 0 for c in unmapped),
+                "converted":       sum(c.get("converted") or 0 for c in unmapped),
+                "human_opened":    sum(c.get("human_opened") or 0 for c in unmapped),
+                "undeliverable":   sum(c.get("undeliverable") or 0 for c in unmapped),
+                "delivery_rate":   0.0,
+                "open_rate":       0.0,
+                "conversion_rate": 0.0,
+                "delivery_delta":  sum(c.get("delivery_delta") or 0 for c in unmapped),
+            },
+            "campaigns": [
+                _campaign_dict(c, step_name=None, step_code=c.get("funnel_step_mapped"), exit_event=None)
+                for c in unmapped
+            ],
+            "entry_event": None,
+            "exit_event":  None,
         })
 
     return result

@@ -10,21 +10,17 @@ Base URL: https://api.customer.io/v1
   CIO_SA_LIVE_READONLY_KEY  (token sa_live)
   ─────────────────────────────────────────
   • Token con acceso COMPLETO al backend de CIO (máximos privilegios).
-  • Se usa ÚNICAMENTE en GET requests (_headers_readonly).
-  • NUNCA debe aparecer en POST, PUT, PATCH ni DELETE.
-  • Si este token se usa para escritura → puedes crear/borrar campañas
-    sin querer y disparar envíos masivos a usuarios reales.
+  • NO es un bearer válido contra la App API pública (api.customer.io/v1) —
+    solo sirve para el intercambio OAuth de fly.customer.io. Este archivo
+    NO lo usa; lo usa exclusivamente customerio_fly_client.py.
 
-  CUSTOMERIO_APP_API_KEY  (token de escritura)
-  ─────────────────────────────────────────────
-  • Token con privilegios de escritura de campañas.
-  • Solo se usa en las funciones de escritura (_headers_write).
-  • Bloqueado por defecto: CIO_DRY_RUN=true en .env impide que
+  CUSTOMERIO_APP_API_KEY  (token de escritura, también válido para lectura)
+  ───────────────────────────────────────────────────────────────────────
+  • Token con privilegios de lectura Y escritura de campañas en la App API pública.
+  • Lectura (_headers_readonly) y escritura (_headers_write) usan este mismo token
+    en este archivo — la App API pública no distingue un token de "solo lectura".
+  • Escritura bloqueada por defecto: CIO_DRY_RUN=true en .env impide que
     cualquier POST/PUT llegue realmente a CIO.
-
-  REGLA DURA: los dos tokens DEBEN ser distintos.
-  Si alguien los configura iguales en .env, el arranque falla
-  con un error explícito (ver validación al final de este bloque).
 
 OTRAS SALVAGUARDAS:
 - Kepler NUNCA llama la Track API (track.customer.io) — esa crea/modifica contactos.
@@ -57,15 +53,16 @@ _SPIKE_THRESHOLD = int(os.getenv("CIO_SPIKE_THRESHOLD", "10000"))
 
 def _headers_readonly(key: str) -> dict[str, str]:
     """
-    Headers para GET requests usando el token sa_live (SOLO LECTURA).
+    Headers para GET requests (SOLO LECTURA por convención de este módulo — la App
+    API pública no impone esa restricción a nivel de token).
 
     ⚠️  SOLO llamar desde funciones que hacen GET requests.
     ⚠️  NUNCA usar este header en POST, PUT, PATCH ni DELETE.
-    key: sa_live_key de CIOCredentials (viene de org_secrets via FunnelClient).
+    key: app_api_key de CIOCredentials (viene de org_secrets via FunnelClient).
     """
     if not key:
         raise RuntimeError(
-            "CIO_SA_LIVE_KEY no disponible. "
+            "CIO_APP_API_KEY no disponible. "
             "Agrega la credencial en org_secrets para esta organización."
         )
     return {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
@@ -97,11 +94,15 @@ def _guard_write(operation: str, detail: str = "") -> None:
 
 
 def get_campaign(campaign_id: str | int, fc) -> dict[str, Any]:
-    """Obtiene detalle de una campaña por ID. Solo lectura — usa token sa_live."""
+    """
+    Obtiene detalle de una campaña por ID. Solo lectura.
+    Usa app_api_key: sa_live_key no es un bearer válido para la App API pública
+    (solo sirve para el intercambio OAuth de fly.customer.io, ver customerio_fly_client.py).
+    """
     creds = fc.get_cio_credentials()
     resp = httpx.get(
         f"{CIO_BASE_URL}/campaigns/{campaign_id}",
-        headers=_headers_readonly(creds.sa_live_key),
+        headers=_headers_readonly(creds.app_api_key),
         timeout=30,
     )
     resp.raise_for_status()
@@ -123,7 +124,7 @@ def get_campaign_actions_full(campaign_id: str | int, fc) -> list[dict[str, Any]
     while True:
         resp = httpx.get(
             f"{CIO_BASE_URL}/campaigns/{campaign_id}/actions",
-            headers=_headers_readonly(creds.sa_live_key),
+            headers=_headers_readonly(creds.app_api_key),
             params=params,
             timeout=30,
         )
@@ -312,7 +313,7 @@ def get_campaign_metrics(campaign_id: str | int, fc, weeks: int = 8) -> dict[str
         creds = fc.get_cio_credentials()
         resp = httpx.get(
             f"{CIO_BASE_URL}/campaigns/{campaign_id}/metrics",
-            headers=_headers_readonly(creds.sa_live_key),
+            headers=_headers_readonly(creds.app_api_key),
             params={"period": "weeks", "steps": weeks},
             timeout=30,
         )
@@ -366,7 +367,8 @@ def get_campaign_metrics(campaign_id: str | int, fc, weeks: int = 8) -> dict[str
             "metrics_weeks_covered": weeks,
         }
     except Exception as exc:
-        logger.warning("Métricas no disponibles para campaña %s (App API): %s", campaign_id, exc)
+        detail = exc.response.text[:300] if isinstance(exc, httpx.HTTPStatusError) else str(exc)
+        logger.error("Métricas NO disponibles para campaña %s (App API) — devolviendo ceros. Causa: %s", campaign_id, detail)
         return {
             "delivered": 0, "total_sent": 0, "opened": 0, "human_opened": 0,
             "clicked": 0, "converted": 0, "bounced": 0, "undeliverable": 0,
