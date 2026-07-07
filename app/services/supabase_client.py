@@ -11,9 +11,11 @@ del .env — mantienen compatibilidad con código Fase 2 mientras se migra incre
 
 import math
 import os
+import re
 import time
 import logging
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -72,6 +74,50 @@ def _to_ml(df: pd.DataFrame, col_mapping: dict[str, str] | None = None) -> pd.Da
         if col in df.columns:
             df = df.drop(columns=[col])
     return df.rename(columns=col_mapping or {})
+
+
+# ─── Composite de prompts (UI de configuración) ───────────────────────────────
+#
+# Marketing edita "el prompt completo del agente" como un solo bloque de texto,
+# pero internamente son 5 filas distintas de funnel_prompts (system/kb_preamble/
+# user_template/perplexity_system/perplexity_query) que van a llamadas de API
+# distintas (Claude vs. Perplexity). Los marcadores <!--@prompt:tipo--> permiten
+# unirlas en un solo texto para la UI y separarlas de nuevo al guardar, sin perder
+# de cuál fila viene cada parte.
+
+_PROMPT_TYPES_ORDER = ["system", "kb_preamble", "user_template", "perplexity_system", "perplexity_query"]
+
+_PROMPT_SECTION_TITLES = {
+    "system":             "INSTRUCCIONES GENERALES DEL AGENTE",
+    "kb_preamble":        "CÓMO USAR LA KNOWLEDGE BASE",
+    "user_template":      "TEMPLATE DE DATOS SEMANALES — NO BORRAR LAS LLAVES { }",
+    "perplexity_system":  "INSTRUCCIONES PARA LA BÚSQUEDA DE MERCADO (PERPLEXITY)",
+    "perplexity_query":   "QUÉ LE PREGUNTAMOS AL BUSCADOR DE MERCADO",
+}
+
+# Variables {...} que el código sustituye en tiempo de ejecución (ver anthropic_client.py
+# call_premium_agent / call_basic_agent) — si se borran del texto, el agente deja de recibir
+# ese dato sin ningún error visible. Por eso se bloquea el guardado si falta alguna.
+_REQUIRED_PLACEHOLDERS = {
+    ("premium", "user_template"): ["{semana_label}", "{shap_text}", "{research_text}", "{journey_text}"],
+    ("basic",   "user_template"): ["{fecha_hoy}", "{calendar_text}", "{journeys_text}"],
+}
+
+_PROMPT_MARKER_RE = re.compile(r"<!--@prompt:(\w+)-->[ \t]*\n")
+
+
+def _parse_prompt_composite(composite: str) -> dict[str, str]:
+    """Separa el texto compuesto de la UI en sus prompt_type según los marcadores."""
+    matches = list(_PROMPT_MARKER_RE.finditer(composite))
+    sections: dict[str, str] = {}
+    for i, m in enumerate(matches):
+        prompt_type = m.group(1)
+        start = m.end()
+        end = matches[i + 1].start() if i + 1 < len(matches) else len(composite)
+        body = composite[start:end]
+        body = re.sub(r"^###[^\n]*\n", "", body, count=1)  # línea de título humano, decorativa
+        sections[prompt_type] = body.strip()
+    return sections
 
 
 # ─── FunnelClient ─────────────────────────────────────────────────────────────
@@ -257,6 +303,142 @@ class FunnelClient:
         )
         rows = res.data or []
         return (rows[0].get("api_params") or {}) if rows else {}
+
+    def get_all_prompts(self) -> list[dict[str, Any]]:
+        """
+        Todas las filas de funnel_prompts del funnel activo — para la UI de
+        configuración donde se leen y editan los system prompts de los agentes
+        (premium/basic) sin tocar código ni correr seed_prompts.py.
+        """
+        org_res = self._client.table("organizations").select("id").eq("slug", self.org_slug).execute()
+        org_rows = org_res.data or []
+        if not org_rows:
+            return []
+        org_id = org_rows[0]["id"]
+        funnel_res = (
+            self._client.table("funnels")
+            .select("id")
+            .eq("org_id", org_id)
+            .eq("slug", self.funnel_slug)
+            .execute()
+        )
+        funnel_rows = funnel_res.data or []
+        if not funnel_rows:
+            return []
+        funnel_id = funnel_rows[0]["id"]
+        res = (
+            self._client.table("funnel_prompts")
+            .select("id, agent_type, prompt_type, content, updated_at")
+            .eq("funnel_id", funnel_id)
+            .order("agent_type")
+            .order("prompt_type")
+            .execute()
+        )
+        return res.data or []
+
+    def update_agent_prompt(self, agent_type: str, prompt_type: str, content: str) -> dict[str, Any]:
+        """
+        Actualiza (o crea si no existe) el contenido de un prompt en funnel_prompts.
+        Usado por la UI de configuración.
+        """
+        org_res = self._client.table("organizations").select("id").eq("slug", self.org_slug).execute()
+        org_rows = org_res.data or []
+        if not org_rows:
+            raise ValueError(f"Organización '{self.org_slug}' no encontrada.")
+        org_id = org_rows[0]["id"]
+        funnel_res = (
+            self._client.table("funnels")
+            .select("id")
+            .eq("org_id", org_id)
+            .eq("slug", self.funnel_slug)
+            .execute()
+        )
+        funnel_rows = funnel_res.data or []
+        if not funnel_rows:
+            raise ValueError(f"Funnel '{self.funnel_slug}' no encontrado para org '{self.org_slug}'.")
+        funnel_id = funnel_rows[0]["id"]
+        res = (
+            self._client.table("funnel_prompts")
+            .upsert(
+                {
+                    "funnel_id": funnel_id,
+                    "agent_type": agent_type,
+                    "prompt_type": prompt_type,
+                    "content": content,
+                    "updated_at": datetime.now(timezone.utc).isoformat(),
+                },
+                on_conflict="funnel_id,agent_type,prompt_type",
+            )
+            .execute()
+        )
+        if not res.data:
+            raise RuntimeError(f"No se pudo guardar el prompt {agent_type}/{prompt_type}.")
+        return res.data[0]
+
+    def get_prompt_composite(self, agent_type: str) -> dict[str, Any]:
+        """
+        Une las 5 filas de funnel_prompts de un agent_type en un solo texto con
+        marcadores <!--@prompt:tipo--> — lo que ve/edita la UI de configuración.
+        """
+        rows = [r for r in self.get_all_prompts() if r["agent_type"] == agent_type]
+        by_type = {r["prompt_type"]: r for r in rows}
+
+        parts: list[str] = []
+        for prompt_type in _PROMPT_TYPES_ORDER:
+            row = by_type.get(prompt_type)
+            content = (row or {}).get("content") or ""
+            title = _PROMPT_SECTION_TITLES[prompt_type]
+            parts.append(f"<!--@prompt:{prompt_type}-->\n### {title}\n{content}".rstrip())
+
+        updated_ats = [r["updated_at"] for r in rows if r.get("updated_at")]
+        return {
+            "agent_type": agent_type,
+            "composite": "\n\n\n".join(parts) + "\n",
+            "updated_at": max(updated_ats) if updated_ats else None,
+        }
+
+    def save_prompt_composite(self, agent_type: str, composite: str) -> dict[str, Any]:
+        """
+        Recibe el texto compuesto editado en la UI, lo separa en sus prompt_type reales,
+        valida que ninguna sección quede vacía y que no falte ninguna variable {...}
+        obligatoria, y guarda SOLO las secciones que realmente cambiaron — así se puede
+        saber qué se modificó aunque el usuario edite todo como un solo bloque.
+        """
+        sections = _parse_prompt_composite(composite)
+
+        missing_sections = [pt for pt in _PROMPT_TYPES_ORDER if not sections.get(pt, "").strip()]
+        if missing_sections:
+            titles = ", ".join(_PROMPT_SECTION_TITLES[pt] for pt in missing_sections)
+            raise ValueError(
+                f"No se puede guardar — estas secciones quedaron vacías: {titles}. "
+                "Ninguna sección puede quedar en blanco (si borraste una por error, "
+                "cancela y vuelve a abrir para recuperar el contenido)."
+            )
+
+        problems: list[str] = []
+        for (a_type, p_type), required in _REQUIRED_PLACEHOLDERS.items():
+            if a_type != agent_type:
+                continue
+            text = sections.get(p_type, "")
+            missing = [ph for ph in required if ph not in text]
+            if missing:
+                problems.append(f"a '{_PROMPT_SECTION_TITLES[p_type]}' le falta(n) {', '.join(missing)}")
+        if problems:
+            raise ValueError(
+                "No se puede guardar — " + "; ".join(problems) + ". "
+                "Esas variables {...} las necesita el sistema para funcionar, no se pueden borrar."
+            )
+
+        current = {r["prompt_type"]: r["content"] for r in self.get_all_prompts() if r["agent_type"] == agent_type}
+
+        updated: list[str] = []
+        for prompt_type in _PROMPT_TYPES_ORDER:
+            new_content = sections[prompt_type].strip()
+            if new_content != (current.get(prompt_type) or "").strip():
+                self.update_agent_prompt(agent_type, prompt_type, new_content)
+                updated.append(prompt_type)
+
+        return {"agent_type": agent_type, "updated": updated}
 
     def update_ml_version(self, version: int) -> None:
         """Actualiza ml.model_version en funnels.config para este funnel."""
@@ -458,6 +640,25 @@ class FunnelClient:
         res = (
             self._client.table(self._t("strategy_results"))
             .select("*")
+            .order("created_at", desc=True)
+            .limit(1)
+            .execute()
+        )
+        rows = res.data or []
+        if not rows:
+            return None
+        row = rows[0]
+        full = row.get("full_result") or {}
+        full["_id"] = row.get("id")
+        full["_created_at"] = row.get("created_at")
+        return full
+
+    def get_strategy_by_semana(self, semana_label: str) -> dict[str, Any] | None:
+        """Última estrategia guardada para una semana específica (incluye research_cifras/citations)."""
+        res = (
+            self._client.table(self._t("strategy_results"))
+            .select("*")
+            .eq("semana_label", semana_label)
             .order("created_at", desc=True)
             .limit(1)
             .execute()
@@ -815,6 +1016,7 @@ def delete_knowledge_base_entry(eid: str) -> None:                            re
 def get_funnel_context() -> list:                                             return _default_fc().get_funnel_context()
 def save_strategy_result(s: dict) -> dict:                                    return _default_fc().save_strategy_result(s)
 def get_latest_strategy() -> dict | None:                                     return _default_fc().get_latest_strategy()
+def get_strategy_by_semana(sl: str) -> dict | None:                           return _default_fc().get_strategy_by_semana(sl)
 def get_strategy_history() -> list:                                           return _default_fc().get_strategy_history()
 def save_structural_result(r: dict) -> dict:                                  return _default_fc().save_structural_result(r)
 def get_latest_structural() -> dict | None:                                   return _default_fc().get_latest_structural()

@@ -47,6 +47,15 @@ _RATE_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Palabras que indican que una cifra de mercado trae su período pegado.
+# Sin una de estas cerca, la cifra es ambigua (ver validate_node_premium regla 6).
+_PERIOD_WORDS_RE = re.compile(
+    r"\b(esta semana|este mes|hoy|diari[oa]|semanal|mensual|anual|acumulad[oa]|"
+    r"año corrido|ano corrido|semestre|en enero|en febrero|en marzo|en abril|en mayo|en junio|"
+    r"en julio|en agosto|en septiembre|en octubre|en noviembre|en diciembre|en lo que va)\b",
+    re.IGNORECASE,
+)
+
 # Liquid — aperturas y cierres de bloque
 _LIQUID_OPEN  = re.compile(r"\{%-?\s*(?:if|unless|for|case)\b")
 _LIQUID_CLOSE = re.compile(r"\{%-?\s*end(?:if|unless|for|case)\b")
@@ -123,6 +132,25 @@ def _rate_in_kb(rate: float, kb_rates: list[float], tol: float = 0.1) -> bool:
     if not kb_rates:
         return True  # sin KB no podemos verificar — no bloqueamos
     return any(abs(rate - kr) <= tol for kr in kb_rates)
+
+
+def _cifra_numbers(cifra_str: str) -> list[float]:
+    """Extrae todos los números dentro de un string de cifra (soporta rangos: '6-10%' → [6, 10])."""
+    out = []
+    for m in re.finditer(r"\d+(?:[.,]\d+)?", cifra_str or ""):
+        try:
+            out.append(float(m.group(0).replace(",", ".")))
+        except ValueError:
+            pass
+    return out
+
+
+def _rate_in_cifras(rate: float, cifras: list[dict[str, Any]], tol: float = 0.5) -> bool:
+    """True si `rate` coincide (±tol) con algún número de alguna cifra verificada del research."""
+    for c in cifras:
+        if any(abs(rate - n) <= tol for n in _cifra_numbers(c.get("cifra", ""))):
+            return True
+    return False
 
 
 
@@ -241,17 +269,22 @@ def validate_node_premium(
     node: dict[str, Any],
     kb_entries: list[dict[str, Any]],
     rules: dict,
+    cifras_verificadas: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """
     Valida un nodo del agente premium — Layer 1 determinista.
 
-    Igual que validate_node EXCEPTO que market data es VÁLIDO (es el contexto
-    que el agente SHAP + Perplexity inyecta intencionalmente).
+    Igual que validate_node, EXCEPTO la regla de menciones de mercado (COLCAP, TRM, etc.
+    por nombre es válido, es el contexto que el agente SHAP + Perplexity inyecta a propósito).
+
+    Las CIFRAS numéricas de mercado sí se validan (a diferencia de antes, cuando se
+    ignoraban por completo): deben coincidir con `cifras_verificadas` (ver
+    anthropic_client.extract_market_cifras), no pueden ir en subject/preheader, deben
+    traer período explícito, y máximo 1 por nodo. Esto es lo que evita que el agente
+    mezcle o invente cifras de mercado en el copy final.
 
     rules: dict de validation_rules desde config JSONB del funnel (obligatorio).
-
-    Reglas activas: chars, forbidden_terms, Liquid balance, voseo, first_name wrapper, KB rates.
-    Regla desactivada: market data.
+    cifras_verificadas: lista de cifras grounded contra el research de esta semana.
     """
     r         = _resolve_rules(rules)
     errors:   list[str] = []
@@ -317,24 +350,58 @@ def validate_node_premium(
                 f"Envolver con: {{% if customer.first_name %}}{{{{ customer.first_name }}}}{{% else %}}{fallback}{{% endif %}}"
             )
 
-    # ── 6. Market data — NO SE VALIDA en premium (es el contexto esperado) ──────
+    # ── 6. Cifras de mercado — prohibidas en subject/preheader ─────────────────
+    # Solo lenguaje direccional sin número ahí ("sube", "se fortalece"). El detalle
+    # numérico, si hace falta, va en el cuerpo (regla 7), donde hay espacio para el período.
+    subject_plain   = _strip_liquid(subject)
+    preheader_plain = _strip_liquid(preheader)
+    for field_name, field_text in (("Subject", subject_plain), ("Preheader", preheader_plain)):
+        m_field_rate = _RATE_RE.search(field_text)
+        if m_field_rate:
+            errors.append(
+                f"{field_name} contiene una cifra ('{m_field_rate.group(0).strip()}') — prohibido, "
+                "solo lenguaje direccional sin número ahí ('sube', 'se fortalece'); el detalle "
+                "numérico con su período va en el cuerpo"
+            )
 
-    # ── 7. Tasas de producto no en KB ──────────────────────────────────────────
-    # Solo verifica tasas de producto (< 100%). Las cifras macro (TRM ~4000,
-    # COLCAP ~1800, etc.) se excluyen porque son datos de mercado esperados en premium.
+    # ── 7. Cifras en el cuerpo — producto contra KB, mercado contra research ───
+    # Cifras de producto (CDT %, fondos): deben coincidir con el KB (±0.1%).
+    # Cifras de mercado (COLCAP, TRM, tasas BanRep, S&P, Brent, etc.): deben coincidir
+    # con cifras_verificadas (grounded contra el research real), traer período explícito
+    # pegado en la misma frase, y hay máximo 1 por nodo. Antes esta regla se saltaba
+    # cualquier número ≥100 sin chequear nada — eso dejaba pasar cifras como "160%"
+    # sin ninguna verificación; ahora todo número se valida contra alguna fuente.
+    cuerpo_plain = _strip_liquid(cuerpo)
     kb_rate_list = _kb_rates(kb_entries)
-    for m_rate in _RATE_RE.finditer(plain_text):
+    cifras_verificadas = cifras_verificadas or []
+    cuerpo_market_matches: list[str] = []
+    for m_rate in _RATE_RE.finditer(cuerpo_plain):
         try:
             rate_num = float(m_rate.group(1).replace(",", "."))
         except ValueError:
             continue
-        if rate_num >= 100:
-            continue
-        if not _rate_in_kb(rate_num, kb_rate_list):
+        if _rate_in_kb(rate_num, kb_rate_list):
+            continue  # tasa de producto propio, válida
+        if _rate_in_cifras(rate_num, cifras_verificadas):
+            cuerpo_market_matches.append(m_rate.group(0).strip())
+        else:
             errors.append(
-                f"Tasa '{m_rate.group(0).strip()}' no encontrada en Knowledge Base — "
-                "verificá que sea correcta o eliminá la cifra específica"
+                f"Cifra '{m_rate.group(0).strip()}' no está en el Knowledge Base ni en las cifras "
+                "de mercado verificadas del research de esta semana — posible alucinación, "
+                "verificala o eliminala"
             )
+
+    if len(cuerpo_market_matches) > 1:
+        errors.append(
+            f"El cuerpo menciona {len(cuerpo_market_matches)} cifras de mercado distintas "
+            f"({', '.join(cuerpo_market_matches)}) — máximo 1 por nodo"
+        )
+    elif cuerpo_market_matches and not _PERIOD_WORDS_RE.search(cuerpo_plain):
+        errors.append(
+            f"La cifra de mercado '{cuerpo_market_matches[0]}' no tiene un período explícito "
+            "pegado en la frase (ej. 'esta semana', 'en julio', 'acumulado del año') — "
+            "sin período es ambigua"
+        )
 
     # ── 8. Warnings ───────────────────────────────────────────────────────────
     if tipo == "email" and not preheader.strip():

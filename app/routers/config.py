@@ -24,6 +24,10 @@ class AddKBPayload(BaseModel):
     contenido: str
 
 
+class UpdatePromptCompositePayload(BaseModel):
+    content: str
+
+
 @router.get("/tracked-campaigns")
 def list_tracked_campaigns(fc: FunnelClient = Depends(get_funnel_client)) -> list[dict[str, Any]]:
     try:
@@ -110,3 +114,30 @@ def update_kb_entry(entry_id: str, body: UpdateKBPayload, fc: FunnelClient = Dep
         return fc.update_knowledge_base_entry(entry_id, updates)
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@router.get("/prompts/composite/{agent_type}")
+def get_prompt_composite(agent_type: str, fc: FunnelClient = Depends(get_funnel_client)) -> dict[str, Any]:
+    try:
+        return fc.get_prompt_composite(agent_type)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@router.put("/prompts/composite/{agent_type}")
+def update_prompt_composite(
+    agent_type: str,
+    body: UpdatePromptCompositePayload,
+    fc: FunnelClient = Depends(get_funnel_client),
+) -> dict[str, Any]:
+    content = body.content.strip()
+    if not content:
+        raise HTTPException(status_code=422, detail="El contenido no puede estar vacío")
+    try:
+        result = fc.save_prompt_composite(agent_type, content)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    fresh = fc.get_prompt_composite(agent_type)
+    return {**result, **fresh}

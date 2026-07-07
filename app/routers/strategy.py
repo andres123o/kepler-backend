@@ -391,13 +391,21 @@ async def validate_and_send_premium(
             ),
         )
 
+    # Cifras de mercado verificadas esta semana — grounded contra el research real
+    # (ver anthropic_client.extract_market_cifras). Sin esto, L1/L2 no pueden distinguir
+    # una cifra real de una alucinada.
+    strategy_saved = fc.get_strategy_by_semana(payload.semana_label)
+    cifras_verificadas = (strategy_saved or {}).get("research_cifras") or []
+    logger.info("[VALIDATE-PREMIUM] Cifras de mercado verificadas para semana=%s: %d",
+                payload.semana_label, len(cifras_verificadas))
+
     results: list[dict[str, Any]] = []
 
     for node_payload in payload.nodes:
         node = node_payload.model_dump()
         await asyncio.sleep(0.3)
 
-        l1 = validate_node_premium(node, kb_entries, rules=rules)
+        l1 = validate_node_premium(node, kb_entries, rules=rules, cifras_verificadas=cifras_verificadas)
         if not l1["passed"]:
             logger.info("[VALIDATE-PREMIUM] L1 FALLO nodo %s: %s",
                         node_payload.id_nodo_cio, l1["errors"])
@@ -414,7 +422,7 @@ async def validate_and_send_premium(
         judge_approved = True
         judge_reason: str = ""
         try:
-            verdict = call_judge_agent_premium(node, kb_full, company_description)
+            verdict = call_judge_agent_premium(node, kb_full, company_description, cifras_verificadas)
             judge_approved = bool(verdict.get("aprobado", True))
             judge_reason   = verdict.get("razon", "")
             logger.info("[VALIDATE-PREMIUM] L2 %s nodo %s (confianza=%.2f): %s",

@@ -144,6 +144,29 @@ def _format_knowledge_base(kb_entries: list[dict[str, Any]]) -> str:
     return "\n\n".join(lines)
 
 
+def _format_cifras_block(cifras: list[dict[str, Any]]) -> str:
+    """
+    Bloque de cifras de mercado verificadas — la ÚNICA fuente permitida de cifras
+    para el copy del agente premium (ver anthropic_client.extract_market_cifras).
+    Cada cifra ya viene con su período pegado para que el agente no pueda separarlos.
+    """
+    if not cifras:
+        return (
+            "CIFRAS DE MERCADO VERIFICADAS: ninguna esta semana. No menciones ningún "
+            "porcentaje ni variación específica de mercado en el copy — usa solo lenguaje "
+            "direccional sin número ('el mercado favorece la inversión', 'el peso se fortalece')."
+        )
+    lines = ["CIFRAS DE MERCADO VERIFICADAS — única fuente permitida para cifras en el copy "
+             "(usa la cifra Y el período exactos, tal como aparecen aquí; máximo 1 por nodo, "
+             "nunca en subject/preheader):"]
+    for c in cifras:
+        lines.append(
+            f"  - {c.get('cifra', '?')} → {c.get('que_mide', '?')} "
+            f"({c.get('periodo', 'sin periodo especificado')})"
+        )
+    return "\n".join(lines)
+
+
 
 # ─── Helpers para formatear journey (fly API) ─────────────────────────────────
 
@@ -612,6 +635,14 @@ def generate_premium_strategy(fc: FunnelClient, market_research: dict | None = N
         logger.info("[PREMIUM] Research: %d chars | %d citations",
                     len(research_text), len(research.get("citations", [])))
 
+    # 5b. Extracción y verificación de cifras de mercado (grounding, ver
+    #     anthropic_client.extract_market_cifras) — única fuente de cifras que el
+    #     agente premium puede usar en el copy. Evita que combine o invente cifras.
+    from app.services.anthropic_client import extract_market_cifras
+    cifras_verificadas = extract_market_cifras(research.get("raw_text") or "")
+    research_text = research_text + "\n\n" + _format_cifras_block(cifras_verificadas)
+    logger.info("[PREMIUM] Cifras de mercado verificadas: %d", len(cifras_verificadas))
+
     # 6. Prompts desde BD del funnel — sin fallback, error explícito si faltan
     system_prompt = fc.get_agent_prompt("premium", "system")
     kb_preamble   = fc.get_agent_prompt("premium", "kb_preamble")
@@ -633,6 +664,11 @@ def generate_premium_strategy(fc: FunnelClient, market_research: dict | None = N
         user_template=user_template,
     )
     strategy["semana_label"] = semana_label
+
+    # Fuentes y cifras — se guardan aparte del texto de la estrategia, NUNCA mezcladas
+    # en el resumen/copy. El frontend las muestra en un desplegable separado.
+    strategy["research_citations"] = research.get("citations") or []
+    strategy["research_cifras"]    = cifras_verificadas
 
     # Attachar nodos_completos para el canvas del frontend
     acciones = strategy.get("acciones") or []
@@ -745,6 +781,9 @@ def generate_basic_strategy(fc: FunnelClient) -> dict[str, Any]:
     # Fallback a fecha_hoy si no hay predicción guardada.
     prediction = fc.get_latest_prediction()
     strategy["semana_label"] = (prediction.get("semana_label") if prediction else None) or fecha_hoy
+
+    # Fuentes del calendario — guardadas aparte, el frontend las muestra en desplegable.
+    strategy["research_citations"] = calendar.get("citations") or []
 
     # Attachar nodos_completos para el canvas: una por acción, matcheando su journey
     for accion in strategy.get("acciones") or []:
