@@ -168,13 +168,23 @@ VALUES (
 
 ## Paso 4 — Entrenar el modelo ML
 
-El pipeline es `ml_pipeline/train.py`. Necesita el master como CSV.
+El pipeline es `ml_pipeline/train.py`. Necesita el master como CSV **y** el
+config ML del funnel (`ml_pipeline/funnel_config.py` → `FunnelMLConfig`) —
+qué columnas del CSV son features, el target, el país para festivos, etc.
+Esto ya NO se edita en ningún .py — vive en `funnels.config.ml` (ver Paso 6).
+Un funnel nuevo no requiere tocar código en este paso.
 
-### 4.1 Exportar master a CSV y entrenar localmente
+### 4.1 Exportar master a CSV y entrenar
 
 ```bash
-# Exportar master desde Supabase a CSV, luego:
-python -m ml_pipeline.train --csv ruta/al/master.csv
+# Opción A — el funnel ya existe en Supabase con su config.ml lleno (Paso 6):
+python -m ml_pipeline.train --csv ruta/al/master.csv --org trii --funnel activacion_cl
+
+# Opción B — el funnel todavía no existe en Supabase (experimentación local,
+# ej. mientras se corre el diagnóstico de dataset antes de decidir el config):
+python -m ml_pipeline.train --csv ruta/al/master.csv --ml-config chile_ml_config.json
+# chile_ml_config.json tiene la misma forma que funnels.config.ml (ver Paso 6)
+
 # Genera models/v{N}/ con model.json, model_meta.json, training_summary.json
 ```
 
@@ -286,6 +296,38 @@ config = {
         "model_storage": "models",   # nombre del bucket de Supabase Storage
         "model_version": 2,          # versión del modelo a usar
         "target_label": "Usuarios Primer Deposito",  # label en la UI
+
+        # --- Config del pipeline de features (FunnelMLConfig) — REQUERIDO para entrenar ---
+        "target_name": "usuarios_primer_cashin",   # default si se omite
+        "date_column": "semana",                   # default si se omite
+        "funnel_features": [                        # REQUERIDO — columnas internas del CSV
+            "usuarios_registro_base", "tasa_registro_a_aprobado", "full_users_aprobados",
+        ],
+        "macro_features": [                          # REQUERIDO — columnas externas del CSV
+            "pen_usd_var_semanal", "bvl_var_semanal", "cobre_var_semanal", "sp500_var_semanal",
+            "trends_fondos_mutuos", "trends_invertir", "is_ventana_quincena",
+            "is_ventana_cts", "is_ventana_gratificacion", "dias_habiles_semana",
+        ],
+        # feature_enrichers: transformaciones de dominio OPCIONALES (ver ml_pipeline/enrichers.py).
+        # Lista vacía [] = sin ninguna, se entrena directo sobre funnel_features+macro_features.
+        # Un funnel de un dominio distinto (no comunicaciones/depósito) simplemente omite esto.
+        "feature_enrichers": [
+            {"type": "business_days", "params": {"country": "PE"}},
+            {"type": "weighted_lag_pipeline", "params": {
+                "source": "full_users_aprobados", "output": "aprobados_ponderados",
+                "weights": [0.214, 0.321, 0.214, 0.107, 0.071, 0.072, 0.0],  # ciclo de conversion del pais, no de codigo
+            }},
+            {"type": "autoregressive_lag", "params": {"source": "$target", "lag": 1, "output": "lag_1_target"}},
+            {"type": "trend_slope", "params": {"source": "full_users_aprobados", "window": 4, "output": "tendencia_aprobados_4w"}},
+        ],
+        "non_negative_columns": ["full_users_aprobados", "usuarios_primer_cashin"],
+        "non_actionable_features": ["full_users_aprobados", "lag_1_target", "full_users_aprobados_lag1"],
+        "multicollinearity_threshold": 0.92,   # opcional, default global 0.92
+
+        "feature_action_map": {
+            # feature (o patrón con *) -> tipo_accion, usado en la prescripción de ml_runner.py
+            "trends_fondos_mutuos": "campana_ahorro", "*dias_habiles*": "estacionalidad",
+        },
     },
     "derived_vars": [
         # Features calculadas por el pipeline (lags, tendencias, adstocks)
@@ -402,6 +444,8 @@ Una vez configurado, el flujo semanal es idéntico para todos los funnels:
 | SHAP muestra vars internas | Grupo del funnel no se llama `"funnel"` | Renombrar `id` del grupo a `"funnel"` en `ingestion_groups` |
 | Storage 400 Bad Request | Bucket no existe | Crear bucket en Supabase Dashboard → Storage antes de subir |
 | Modelo carga pero features no alinean | El master del funnel tiene nombres de columnas distintos al modelo | Revisar `ml_column_mapping` en config — mapea Supabase → pipeline |
+| `ValueError: Config ML incompleto — faltan las llaves...` al entrenar | Falta `ml.funnel_features` o `ml.macro_features` en el config del funnel | Agregar esas dos listas al config JSONB (ver Paso 6) — sin ellas no hay features posibles |
+| `dias_habiles_semana` sale distinto al esperado | El enricher `business_days` no está declarado o tiene el `country` equivocado | Agregar `{"type": "business_days", "params": {"country": "..."}}` a `ml.feature_enrichers` con el código correcto. Si el CSV ya trae la columna calculada, se preserva tal cual — solo se rellenan los NaN |
 | `Bucket not found` en predicción | `ml.model_storage` no está en el config del funnel | Correr script `set_{funnel}_config.py` con el config completo |
 | Formulario de ingreso vacío | `ingestion_groups` no está en el config | Agregar la sección al config del funnel |
 | Auto-fetch no llena campos | `data_sources` no está en el config | Agregar la sección al config del funnel |
@@ -651,9 +695,58 @@ Pipeline de 8 etapas para selección de features:
 8. Tabla resumen de decisión
 
 Para un funnel nuevo: correr el mismo pipeline sobre el master del nuevo país. Ver decisiones finales en `FEATURE_SELECTION_PIPELINE.md`.
+Para Chile se guardaron los scripts (no se borraron esta vez) en `chile/diagnostico/`.
 
 ### lag_analysis_peru.py
 Analizó el ciclo real del usuario peruano (registro → primer depósito):
 - Semana 0: 29.2%, Semana 1: 35.3% (pico), Semana 2: 12.5%, ... Semana 8: 1.9%
 - Determinó que `full_users_aprobados` con lag 1 es el predictor clave de volumen.
 - Para un funnel nuevo: entrevistar a producto para obtener la distribución real del ciclo usuario → correr el mismo análisis de correlación con distintos lags.
+
+---
+
+## Apéndice C — Motor ML genérico + enrichers por dominio (2026-07-07)
+
+**Antes (primera vuelta):** `ml_pipeline/config.py` tenía `FUNNEL_FEATURES`/
+`MACRO_FEATURES`/etc. hardcodeados a Colombia. Entrenar un funnel nuevo (Perú)
+requería editar ese archivo a mano, entrenar, y revertirlo. Además
+`feature_engineering.py` recalculaba `dias_habiles_semana` con festivos
+colombianos SIEMPRE, sobreescribiendo sin avisar el valor correcto que ya
+trajera el CSV de otro país.
+
+**Primer intento (insuficiente):** mover `holidays_country`/`weighted_pipeline`
+a `funnels.config.ml` resolvió lo de Colombia-hardcodeado, pero seguía
+asumiendo que TODO funnel nuevo es una variante del mismo problema (funnel de
+comunicaciones → depósito semanal). Un funnel de un dominio completamente
+distinto (otro dataset, otro negocio) igual tenía que lidiar con conceptos de
+festivos/ciclos de conversión en su config, aunque no los necesitara.
+
+**Arquitectura final — enrichers opcionales:**
+`ml_pipeline/enrichers.py` define un registro (`ENRICHER_REGISTRY`) de
+transformaciones de dominio, cada una un mecanismo 100% genérico (no tiene ni
+un solo valor de ningún país o funnel adentro):
+
+| Enricher | Qué hace | Reemplaza a |
+|---|---|---|
+| `business_days` | Cuenta días hábiles según el país (`country`: código `holidays` o `"CO_EXACT"` para el calendario colombiano verificado a mano) | El cálculo de `dias_habiles_semana` viejo |
+| `calendar_days_pct` | % de días de la semana que caen en un set de días-del-mes dado | `pct_dias_quincena` viejo (hardcodeado a Colombia) |
+| `weighted_lag_pipeline` | Comprime N lags de una variable en un solo número, con pesos dados | El "weighted pipeline" del ciclo aprobación→depósito |
+| `autoregressive_lag` | `lag(source, n)` — cualquier columna, no solo el target | `lag_1_target`, `full_users_aprobados_lag1` |
+| `trend_slope` | Pendiente OLS de una ventana de N observaciones | `tendencia_aprobados_4w`, `tendencia_depositos_4w` |
+
+Un funnel los declara en `ml.feature_enrichers` (lista de `{type, params}`,
+ver ejemplo en Paso 6) — **los VALORES reales (pesos del ciclo, país, días de
+ventana) son datos en `funnels.config.ml`, nunca código Python.** Si un
+funnel es de un dominio totalmente distinto (no comunicaciones/depósito),
+simplemente deja `feature_enrichers: []` y entrena directo sobre
+`funnel_features + macro_features` — el motor (contratos de datos, poda de
+multicolinealidad, Optuna + XGBoost, walk-forward CV) es agnóstico al
+dominio y al dataset.
+
+`feature_engineering.py` quedó reducido a: parseo de fechas, `prepare_base_df`
+y `build_feature_matrix` (que solo hace: shift del target + aplicar los
+enrichers declarados + ensamblar + drop warm-up). Cero funciones de dominio.
+
+Montar un funnel nuevo ya no toca ningún `.py` — solo llenar
+`ml.funnel_features` y `ml.macro_features` (mínimo) en el config JSONB del
+Paso 6, y `ml.feature_enrichers` si el funnel necesita alguna transformación.

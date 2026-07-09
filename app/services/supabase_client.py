@@ -718,14 +718,18 @@ class FunnelClient:
         return None
 
     def get_user_campaign(self, user_name: str) -> str | None:
+        """Primera campaña asignada al usuario (para el badge 'Tu campaña').
+        Un usuario puede tener varias campañas asignadas — esto no las filtra,
+        solo retorna la primera para uso cosmético en la UI."""
         res = (
             self._client.table(self._t("user_campaign_assignments"))
             .select("campaign_name")
             .eq("user_name", user_name)
-            .single()
+            .limit(1)
             .execute()
         )
-        return (res.data or {}).get("campaign_name")
+        rows = res.data or []
+        return rows[0]["campaign_name"] if rows else None
 
     def get_all_assignments(self) -> list[dict[str, Any]]:
         res = (
@@ -858,11 +862,9 @@ class FunnelClient:
         campaign_totals = {k: len(v) for k, v in campaign_node_ids.items()}
 
         def _total_for(campaign_name: str) -> int | None:
-            c = campaign_name.lower()
-            if c in campaign_totals:
-                return campaign_totals[c]
+            c = _norm(campaign_name)
             for k, v in campaign_totals.items():
-                if c in k or k in c:
+                if c == _norm(k) or c in _norm(k) or _norm(k) in c:
                     return v
             return None
 
@@ -875,9 +877,17 @@ class FunnelClient:
             updates_q = updates_q.eq("semana_label", semana_label)
         updates = updates_q.execute().data or []
 
+        def _norm(s: str) -> str:
+            """Lowercase + quita tildes/diacríticos — 'Perú' y 'Peru' deben calzar."""
+            import unicodedata
+            return "".join(
+                c for c in unicodedata.normalize("NFKD", s.lower())
+                if not unicodedata.combining(c)
+            )
+
         def _camp_eq(a: str, b: str) -> bool:
-            """Fuzzy match de nombres de campaña (tolerante a sufijos como '| keplerv4')."""
-            x, y = a.lower(), b.lower()
+            """Fuzzy match de nombres de campaña (tolerante a tildes y a sufijos como '| keplerv4')."""
+            x, y = _norm(a), _norm(b)
             return x == y or x in y or y in x
 
         # Índice por campaña: campaign_lower → list de entries (cualquier sender)

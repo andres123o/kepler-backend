@@ -7,8 +7,8 @@ Inputs:
   3. kepler-backend/models/v{N}/   — modelo entrenado localmente
 
 Uso:
-  python scripts/prediccion_ultima_semana.py --csv Master_Consolidado_Final.csv
-  python scripts/prediccion_ultima_semana.py --csv Master_Consolidado_Final.csv --excel "ultima semana.xlsx"
+  python scripts/prediccion_ultima_semana.py --csv master.csv --org trii --funnel activacion_co
+  python scripts/prediccion_ultima_semana.py --csv master.csv --excel "ultima semana.xlsx" --ml-config chile_ml_config.json
 """
 from __future__ import annotations
 
@@ -106,13 +106,14 @@ def main():
     import xgboost as xgb
     import shap
 
-    from ml_pipeline.config import BENCHMARK_WINDOW_WEEKS, TARGET_NAME
+    from ml_pipeline.config import BENCHMARK_WINDOW_WEEKS
     from ml_pipeline.data_contracts import validate_data_contracts
     from ml_pipeline.feature_engineering import (
         build_feature_matrix,
         csv_bytes_to_dataframe,
         prepare_base_df,
     )
+    from ml_pipeline.funnel_config import load_funnel_ml_config, load_funnel_ml_config_from_json
 
     parser = argparse.ArgumentParser(
         description="Predicción + SHAP: historial CSV + ultima semana.xlsx + modelo local."
@@ -125,11 +126,25 @@ def main():
         "--excel", type=Path, default=None,
         help="Ruta a 'ultima semana.xlsx' (por defecto se busca automáticamente).",
     )
+    parser.add_argument("--ml-config", type=Path, default=None,
+                         help="Ruta a un .json local con funnel_features/macro_features/etc.")
+    parser.add_argument("--org", default=None, help="org_slug — lee el config ML desde Supabase")
+    parser.add_argument("--funnel", default=None, help="funnel_slug — lee el config ML desde Supabase")
     # Backwards compatibility silenciosa
     parser.add_argument("--organization-id", default=None, help=argparse.SUPPRESS)
     parser.add_argument("--semana", default=None, help=argparse.SUPPRESS)
     parser.add_argument("--ingesta-reentreno", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args()
+
+    if args.ml_config:
+        ml_cfg = load_funnel_ml_config_from_json(args.ml_config)
+    elif args.org and args.funnel:
+        from app.services.supabase_client import FunnelClient
+        fc = FunnelClient(args.org, args.funnel)
+        ml_cfg = load_funnel_ml_config(fc.get_funnel_config().get("ml") or {})
+    else:
+        logger.error("Se necesita --ml-config archivo.json  O  --org X --funnel Y")
+        sys.exit(1)
 
     # --- Rutas ---
     csv_path = Path(args.csv)
@@ -267,7 +282,7 @@ def main():
     logger.info("DataFrame combinado: %d filas.", len(df_combined))
 
     # 6b) Validar contratos de datos sobre la nueva fila del Excel
-    contracts_ok, violations = validate_data_contracts(df_new)
+    contracts_ok, violations = validate_data_contracts(df_new, ml_cfg.non_negative_columns, ml_cfg.target_name)
     if not contracts_ok:
         logger.error(
             "CONTRATOS FALLIDOS en datos del Excel (%d violación/es) — "
@@ -285,7 +300,7 @@ def main():
 
     # 7) Pipeline de features (drop_na=False para conservar la última fila sin target)
     df_prepared = prepare_base_df(df_combined)
-    X_full, y_full, feature_names_full = build_feature_matrix(df_prepared, drop_na=False)
+    X_full, y_full, feature_names_full = build_feature_matrix(df_prepared, ml_cfg, drop_na=False)
     if len(X_full) == 0:
         logger.error("No quedaron filas útiles tras el pipeline de features.")
         sys.exit(1)
@@ -300,7 +315,7 @@ def main():
         sys.exit(1)
 
     model_feature_names = meta.get("feature_names", [])
-    target_name = meta.get("target_name", TARGET_NAME)
+    target_name = meta.get("target_name", ml_cfg.target_name)
     version = meta.get("version", "?")
 
     # Alinear features faltantes con NaN (nunca con 0)

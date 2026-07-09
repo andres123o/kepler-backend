@@ -1,8 +1,15 @@
 """
-Entrenamiento del modelo ML (pipeline v2) — todo local, sin Supabase.
+Entrenamiento del modelo ML (pipeline v2).
 
-Uso:
-  python -m ml_pipeline.train --csv Master_Consolidado_Final.csv
+El config de features (qué columnas del CSV entran, target, país para
+festivos, weighted pipeline) es específico de cada funnel — ver
+ml_pipeline/funnel_config.py. Dos formas de dárselo al CLI:
+
+  # Funnel ya existe en Supabase — lee funnels.config.ml directo:
+  python -m ml_pipeline.train --csv master.csv --org trii --funnel activacion_co
+
+  # Funnel nuevo / experimentación sin Supabase todavía:
+  python -m ml_pipeline.train --csv master.csv --ml-config chile_ml_config.json
 
 El modelo se guarda en:
   kepler-backend/models/v{N}/model.json
@@ -31,11 +38,8 @@ import optuna
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 
 from ml_pipeline.config import (
-    ALL_CSV_FEATURES,
-    COMPUTED_FEATURE_NAMES,
     INITIAL_TRAIN_WEEKS,
     LOSS_OBJECTIVE,
-    MULTICOLLINEARITY_THRESHOLD,
     OPTUNA_MAX_DEPTH_RANGE,
     OPTUNA_N_TRIALS,
     OPTUNA_NUM_BOOST_ROUND_RANGE,
@@ -47,7 +51,6 @@ from ml_pipeline.config import (
     OPTUNA_MIN_CHILD_WEIGHT_RANGE,
     OPTUNA_TIMEOUT_SECONDS,
     TARGET_CLIP_PERCENTILE,
-    TARGET_NAME,
 )
 from ml_pipeline.data_contracts import (
     clip_target_to_percentile,
@@ -60,6 +63,7 @@ from ml_pipeline.feature_engineering import (
     load_csv,
     prepare_base_df,
 )
+from ml_pipeline.funnel_config import FunnelMLConfig, load_funnel_ml_config, load_funnel_ml_config_from_json
 from ml_pipeline.validation import walk_forward_splits
 
 LOCAL_MODELS_ROOT = _BACKEND / "models"
@@ -79,15 +83,16 @@ logger = logging.getLogger("kepler.ml.train")
 
 
 def _next_version(root: Path | None = None) -> int:
-    """Retorna la siguiente versión leyendo carpetas v* existentes en root (default: models/)."""
+    """Retorna la siguiente versión leyendo carpetas v* existentes en root (default: models/).
+    Carpeta vacía/inexistente -> v0 (primer modelo de un funnel nuevo)."""
     target = root or LOCAL_MODELS_ROOT
     if not target.exists():
-        return 1
+        return 0
     versions = []
     for d in target.glob("v*"):
         if d.is_dir() and d.name[1:].isdigit():
             versions.append(int(d.name[1:]))
-    return max(versions) + 1 if versions else 1
+    return max(versions) + 1 if versions else 0
 
 
 def train_one_fold(X_train, y_train, X_test, y_test, params: dict, num_boost_round: int):
@@ -101,7 +106,7 @@ def train_one_fold(X_train, y_train, X_test, y_test, params: dict, num_boost_rou
     return float(mean_absolute_error(y_test, pred)), model.best_iteration
 
 
-def run_training(csv_path: Path, output_dir: Path | None = None) -> dict:
+def run_training(csv_path: Path, ml_cfg: FunnelMLConfig, output_dir: Path | None = None) -> dict:
     logger.info("========== INICIO ENTRENAMIENTO ==========")
     logger.info("[Fase 0] Leyendo CSV: %s", csv_path)
     data = csv_path.read_bytes()
@@ -123,13 +128,13 @@ def run_training(csv_path: Path, output_dir: Path | None = None) -> dict:
 
     # Fase 1: Contratos
     logger.info("[Fase 1] Validando contratos de datos...")
-    ok, violations = validate_data_contracts(df)
+    ok, violations = validate_data_contracts(df, ml_cfg.non_negative_columns, ml_cfg.target_name)
     if not ok:
         raise ValueError("Contratos fallidos: " + "; ".join(violations))
 
     # Fase 2: Features
     logger.info("[Fase 2] Construyendo matriz de features...")
-    X_full, y_full, feature_names = build_feature_matrix(df, drop_na=True)
+    X_full, y_full, feature_names = build_feature_matrix(df, ml_cfg, drop_na=True)
     if len(X_full) < INITIAL_TRAIN_WEEKS + 5:
         raise ValueError(
             f"Filas útiles ({len(X_full)}) insuficientes para walk-forward (mínimo {INITIAL_TRAIN_WEEKS}+5)."
@@ -137,12 +142,13 @@ def run_training(csv_path: Path, output_dir: Path | None = None) -> dict:
     logger.info("[Fase 2] Aplicando target clipping (p%d)...", TARGET_CLIP_PERCENTILE)
     y_full = clip_target_to_percentile(y_full, TARGET_CLIP_PERCENTILE)
 
-    # Fase 2.3: Poda multicolinealidad (solo ALL_CSV_FEATURES — tiempo t)
-    # Las COMPUTED_FEATURE_NAMES quedan fuera de esta poda (ver data_contracts.prune_multicollinearity).
-    logger.info("[Fase 2.3] Poda multicolinealidad (threshold=%.2f)...", MULTICOLLINEARITY_THRESHOLD)
-    csv_time_t = [f for f in feature_names if f in ALL_CSV_FEATURES]
-    computed_cols = [f for f in feature_names if f in COMPUTED_FEATURE_NAMES]
-    surviving = prune_multicollinearity(X_full, csv_time_t, MULTICOLLINEARITY_THRESHOLD)
+    # Fase 2.3: Poda multicolinealidad (solo columnas crudas del CSV — tiempo t).
+    # Las features generadas por enrichers quedan fuera de esta poda: son
+    # derivadas a propósito (lags, tendencias, etc.), no columnas redundantes.
+    logger.info("[Fase 2.3] Poda multicolinealidad (threshold=%.2f)...", ml_cfg.multicollinearity_threshold)
+    csv_time_t = [f for f in feature_names if f in ml_cfg.all_csv_features]
+    computed_cols = [f for f in feature_names if f not in ml_cfg.all_csv_features]
+    surviving = prune_multicollinearity(X_full, csv_time_t, ml_cfg.multicollinearity_threshold)
     feature_names = surviving + computed_cols
     X_full = X_full[feature_names]
 
@@ -241,7 +247,7 @@ def run_training(csv_path: Path, output_dir: Path | None = None) -> dict:
     version_dir = models_root / f"v{version}"
     version_dir.mkdir(parents=True, exist_ok=True)
 
-    meta = {"feature_names": feature_names, "target_name": TARGET_NAME, "version": version}
+    meta = {"feature_names": feature_names, "target_name": ml_cfg.target_name, "version": version}
     summary = {
         "version": version,
         "mae_walk_forward": best_mae_wf,
@@ -267,9 +273,41 @@ def run_training(csv_path: Path, output_dir: Path | None = None) -> dict:
     return summary
 
 
+def _resolve_ml_config(args) -> FunnelMLConfig:
+    """
+    Dos formas de obtener el config ML del funnel para el CLI:
+      --ml-config archivo.json   : lee un .json local con la forma de funnels.config.ml
+                                    (útil antes de crear el funnel en Supabase, ej. experimentación).
+      --org X --funnel Y         : lee funnels.config.ml directo de Supabase (mismo path que produccion).
+    """
+    if args.ml_config:
+        return load_funnel_ml_config_from_json(args.ml_config)
+
+    if args.org and args.funnel:
+        from app.services.supabase_client import FunnelClient
+        fc = FunnelClient(args.org, args.funnel)
+        ml_cfg_dict = fc.get_funnel_config().get("ml") or {}
+        return load_funnel_ml_config(ml_cfg_dict)
+
+    print(
+        "Error: se necesita --ml-config archivo.json  O  --org X --funnel Y",
+        file=sys.stderr,
+    )
+    sys.exit(1)
+
+
 def main():
     parser = argparse.ArgumentParser(description="Entrenar modelo XGBoost — todo local.")
     parser.add_argument("--csv", type=Path, required=True, help="Ruta a Master_Consolidado_Final.csv")
+    parser.add_argument("--ml-config", type=Path, default=None,
+                         help="Ruta a un .json local con funnel_features/macro_features/etc. "
+                              "(alternativa a --org/--funnel para funnels que aún no existen en Supabase)")
+    parser.add_argument("--org", default=None, help="org_slug — lee el config ML desde Supabase")
+    parser.add_argument("--funnel", default=None, help="funnel_slug — lee el config ML desde Supabase")
+    parser.add_argument("--output-dir", type=Path, default=None,
+                         help="Carpeta raíz donde guardar v{N}/ (default: kepler-backend/models). "
+                              "Cada funnel/país debería tener la suya propia, ej. ../chile/models, "
+                              "para que el versionado local no se mezcle entre funnels distintos.")
     # Backwards compatibility: --organization-id se acepta pero se ignora
     parser.add_argument("--organization-id", default=None, help=argparse.SUPPRESS)
     args = parser.parse_args()
@@ -281,8 +319,14 @@ def main():
         print(f"Error: CSV no encontrado: {csv_path}", file=sys.stderr)
         sys.exit(1)
 
+    ml_cfg = _resolve_ml_config(args)
+
+    output_dir = args.output_dir
+    if output_dir is not None and not output_dir.is_absolute():
+        output_dir = (_BACKEND / output_dir).resolve()
+
     try:
-        summary = run_training(csv_path)
+        summary = run_training(csv_path, ml_cfg, output_dir=output_dir)
         print(json.dumps(summary, indent=2))
     except Exception as e:
         logger.exception("Entrenamiento fallido: %s", e)

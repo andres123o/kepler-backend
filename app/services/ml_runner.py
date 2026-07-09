@@ -22,9 +22,10 @@ _BACKEND = Path(__file__).resolve().parent.parent.parent
 if str(_BACKEND) not in sys.path:
     sys.path.insert(0, str(_BACKEND))
 
-from ml_pipeline.config import BENCHMARK_WINDOW_WEEKS, NON_ACTIONABLE_FEATURES, TARGET_NAME
+from ml_pipeline.config import BENCHMARK_WINDOW_WEEKS
 from ml_pipeline.data_contracts import validate_data_contracts
 from ml_pipeline.feature_engineering import build_feature_matrix, prepare_base_df
+from ml_pipeline.funnel_config import load_funnel_ml_config
 from ml_pipeline.train import run_training as _pipeline_train
 
 from datetime import date, timedelta
@@ -231,6 +232,7 @@ def run_prediction(fc: FunnelClient | None = None) -> dict[str, Any]:
     # Determinar fuente del modelo desde config del funnel
     funnel_cfg = fc.get_funnel_config()
     ml_cfg     = funnel_cfg.get("ml") or {}
+    funnel_ml_cfg = load_funnel_ml_config(ml_cfg)
 
     # 3. Construir nueva fila alineada con columnas del historial
     def _norm(s: str) -> str:
@@ -264,20 +266,20 @@ def run_prediction(fc: FunnelClient | None = None) -> dict[str, Any]:
 
     # 4. Validar contratos de datos
     df_new = pd.DataFrame([new_row])
-    ok, violations = validate_data_contracts(df_new)
+    ok, violations = validate_data_contracts(df_new, funnel_ml_cfg.non_negative_columns, funnel_ml_cfg.target_name)
     if not ok:
         logger.warning("Contratos fallidos en ultima_semana: %s", violations)
 
     # 5. Combinar historial + nueva fila y correr pipeline
     df_combined = pd.concat([df_hist, df_new], ignore_index=True)
     df_prepared = prepare_base_df(df_combined)
-    X_full, y_full, feature_names = build_feature_matrix(df_prepared, drop_na=False)
+    X_full, y_full, feature_names = build_feature_matrix(df_prepared, funnel_ml_cfg, drop_na=False)
 
     if len(X_full) == 0:
         raise ValueError("No quedaron filas tras el pipeline de features.")
 
     # Referencia al DataFrame crudo (pre-FE) — contiene features nativas del funnel
-    # que build_feature_matrix() no incluye en X (ej. features PE no listadas en ALL_CSV_FEATURES).
+    # que build_feature_matrix() no incluye en X si no están listadas en ml.funnel_features/macro_features.
     # Se usa como fallback para recuperar current_value y trailing_12w_mean en el contexto SHAP.
     _df_raw_hist = df_prepared.iloc[:-1]   # historial sin la fila de predicción
     _raw_last    = df_prepared.iloc[-1]    # fila de predicción actual (valores del usuario)
@@ -290,12 +292,12 @@ def run_prediction(fc: FunnelClient | None = None) -> dict[str, Any]:
         model_root    = (_BACKEND / model_dir_rel) if model_dir_rel else LOCAL_MODELS_ROOT
         booster, meta, mae_modelo = _load_latest_model(model_root)
     model_features = meta.get("feature_names", [])
-    target_name = meta.get("target_name", TARGET_NAME)
+    target_name = meta.get("target_name", funnel_ml_cfg.target_name)
     version = meta.get("version", "?")
 
     # Extender X_full con features nativas del funnel que están en df_prepared
-    # pero que build_feature_matrix() excluye (usa ALL_CSV_FEATURES hardcodeado para CO).
-    # Sin esto, cualquier funnel no-CO recibe NaN en sus features propias → predicción incorrecta.
+    # pero que build_feature_matrix() excluye (no listadas en ml.funnel_features/macro_features).
+    # Red de seguridad ante drift entre el config actual y meta.json del modelo entrenado.
     missing_in_X = [f for f in model_features if f not in X_full.columns and f in df_prepared.columns]
     if missing_in_X:
         logger.info("Añadiendo %d features del funnel a X_full desde df_prepared: %s", len(missing_in_X), missing_in_X)
@@ -358,7 +360,8 @@ def run_prediction(fc: FunnelClient | None = None) -> dict[str, Any]:
 
     # Filtrar features no accionables del display (funnel interno + autoregresivo)
     # El modelo las usa para predecir pero Marketing no puede actuar sobre ellas vía CIO.
-    shap_display = [s for s in shap_list if s["feature"] not in NON_ACTIONABLE_FEATURES]
+    # Lista viene de ml.non_actionable_features en el config del funnel.
+    shap_display = [s for s in shap_list if s["feature"] not in funnel_ml_cfg.non_actionable_features]
 
     # 10. Contexto histórico (z-scores vs. últimas 12 semanas)
     X_hist_ctx = X_full.iloc[:-1]
@@ -390,8 +393,7 @@ def run_prediction(fc: FunnelClient | None = None) -> dict[str, Any]:
         })
 
     # 11. Prescripción — evalúa todos los features del contexto, no solo el top 5
-    # Cargar mapa feature→tipo_accion desde config del funnel
-    ml_cfg = fc.get_funnel_config().get("ml") or {}
+    # Mapa feature→tipo_accion viene de ml.feature_action_map en el config del funnel
     feature_action_map: dict[str, str] = ml_cfg.get("feature_action_map") or {}
 
     prescripcion = []
@@ -408,7 +410,7 @@ def run_prediction(fc: FunnelClient | None = None) -> dict[str, Any]:
             "direccion": "negativa" if contrib < 0 else "positiva",
             "severidad": "crítica" if abs(z) > 2.0 else "alerta" if abs(z) > 1.5 else "monitorear",
         }
-        if feat in NON_ACTIONABLE_FEATURES:
+        if feat in funnel_ml_cfg.non_actionable_features:
             accion["tipo_accion"] = "monitorear_no_accionable"
         else:
             # Buscar en el mapa de acción del funnel (feature_action_map en config ML)
@@ -471,6 +473,7 @@ def run_training(fc: FunnelClient | None = None) -> dict[str, Any]:
 
     funnel_cfg = fc.get_funnel_config()
     ml_cfg     = funnel_cfg.get("ml") or {}
+    funnel_ml_cfg = load_funnel_ml_config(ml_cfg)
 
     use_storage = bool(ml_cfg.get("model_storage"))
 
@@ -482,7 +485,7 @@ def run_training(fc: FunnelClient | None = None) -> dict[str, Any]:
         train_output_dir = (_BACKEND / model_dir_rel) if model_dir_rel else None
 
     try:
-        summary = _pipeline_train(tmp_path, output_dir=train_output_dir)
+        summary = _pipeline_train(tmp_path, funnel_ml_cfg, output_dir=train_output_dir)
     finally:
         tmp_path.unlink(missing_ok=True)
 

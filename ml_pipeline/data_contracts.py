@@ -2,22 +2,23 @@
 Fase 1: Contratos de datos (Data Contracts).
 Valida negativos, saltos anómalos y tipos antes de entrenar.
 NaN en columnas de canales son legítimos — solo se validan filas no-NaN.
+
+non_negative_columns y target_name vienen de FunnelMLConfig (por funnel) —
+ver ml_pipeline/funnel_config.py.
 """
 
 import logging
 
 import pandas as pd
 
-from ml_pipeline.config import (
-    ANOMALY_JUMP_PCT,
-    NON_NEGATIVE_COLUMNS,
-    TARGET_NAME,
-)
+from ml_pipeline.config import ANOMALY_JUMP_PCT
 
 logger = logging.getLogger("kepler.ml.data_contracts")
 
 
-def validate_data_contracts(df: pd.DataFrame) -> tuple[bool, list[str]]:
+def validate_data_contracts(
+    df: pd.DataFrame, non_negative_columns: list[str], target_name: str
+) -> tuple[bool, list[str]]:
     """
     Aplica contratos de datos. Retorna (ok, lista de mensajes de violación).
     Si ok=False, no se debe entrenar.
@@ -26,7 +27,7 @@ def validate_data_contracts(df: pd.DataFrame) -> tuple[bool, list[str]]:
 
     # 1) No negativos en columnas que no lo permiten
     # Solo validar filas no-NaN (columnas de canales tienen NaN legítimos antes de su fecha de inicio)
-    for col in NON_NEGATIVE_COLUMNS:
+    for col in non_negative_columns:
         if col not in df.columns:
             continue
         valid = df[col].dropna()
@@ -38,9 +39,9 @@ def validate_data_contracts(df: pd.DataFrame) -> tuple[bool, list[str]]:
 
     # 2) Saltos anómalos semana a semana en target — ALERTA, no bloqueante
     # En datasets históricos (desde 2020) los saltos grandes son normales en fases de crecimiento.
-    if TARGET_NAME in df.columns:
-        diff_pct = df[TARGET_NAME].pct_change() * 100
-        prev = df[TARGET_NAME].shift(1)
+    if target_name in df.columns:
+        diff_pct = df[target_name].pct_change() * 100
+        prev = df[target_name].shift(1)
         mask = (prev != 0) & (prev.notna())
         jump = diff_pct.abs() > ANOMALY_JUMP_PCT
         anomaly_rows = (mask & jump).sum()
@@ -48,7 +49,7 @@ def validate_data_contracts(df: pd.DataFrame) -> tuple[bool, list[str]]:
             logger.warning(
                 "Alerta (no bloqueante): %s tiene %d saltos > %s%% semana a semana. "
                 "Revisar si son datos reales o errores de ingesta.",
-                TARGET_NAME, anomaly_rows, ANOMALY_JUMP_PCT,
+                target_name, anomaly_rows, ANOMALY_JUMP_PCT,
             )
 
     ok = len(violations) == 0
