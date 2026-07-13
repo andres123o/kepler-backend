@@ -637,40 +637,45 @@ class FunnelClient:
         return saved
 
     def get_latest_strategy(self) -> dict[str, Any] | None:
+        """Última estrategia PREMIUM (excluye filas _tipo='estructural' del agente básico —
+        mismo filtro que get_strategy_history/get_latest_structural. Sin este filtro, si el
+        agente básico corre después del premium en la misma semana, esta función devolvía
+        la fila básica por error — y con ella, research_cifras vacío, lo que hacía que el
+        validador de copy premium rechazara cifras de mercado reales como 'no verificadas'."""
         res = (
             self._client.table(self._t("strategy_results"))
             .select("*")
             .order("created_at", desc=True)
-            .limit(1)
             .execute()
         )
-        rows = res.data or []
-        if not rows:
-            return None
-        row = rows[0]
-        full = row.get("full_result") or {}
-        full["_id"] = row.get("id")
-        full["_created_at"] = row.get("created_at")
-        return full
+        for row in res.data or []:
+            full = row.get("full_result") or {}
+            if full.get("_tipo") == "estructural":
+                continue
+            full["_id"] = row.get("id")
+            full["_created_at"] = row.get("created_at")
+            return full
+        return None
 
     def get_strategy_by_semana(self, semana_label: str) -> dict[str, Any] | None:
-        """Última estrategia guardada para una semana específica (incluye research_cifras/citations)."""
+        """Última estrategia PREMIUM guardada para una semana específica (incluye
+        research_cifras/citations). Excluye filas _tipo='estructural' — ver nota en
+        get_latest_strategy sobre por qué esto es necesario."""
         res = (
             self._client.table(self._t("strategy_results"))
             .select("*")
             .eq("semana_label", semana_label)
             .order("created_at", desc=True)
-            .limit(1)
             .execute()
         )
-        rows = res.data or []
-        if not rows:
-            return None
-        row = rows[0]
-        full = row.get("full_result") or {}
-        full["_id"] = row.get("id")
-        full["_created_at"] = row.get("created_at")
-        return full
+        for row in res.data or []:
+            full = row.get("full_result") or {}
+            if full.get("_tipo") == "estructural":
+                continue
+            full["_id"] = row.get("id")
+            full["_created_at"] = row.get("created_at")
+            return full
+        return None
 
     def get_strategy_history(self) -> list[dict[str, Any]]:
         res = (

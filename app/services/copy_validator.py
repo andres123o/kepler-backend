@@ -41,9 +41,14 @@ def _resolve_rules(rules: dict) -> dict:
 
 # ─── Constantes estructurales (invariantes entre funnels) ────────────────────
 
-# Tasas y porcentajes en el copy
+# Tasas y porcentajes en el copy.
+# El \b final va DENTRO del grupo opcional del sufijo (EA/anual/...) — si va afuera,
+# nunca hace match cuando el "%" no tiene sufijo pegado (ej. "12%," o "12% y"), porque
+# "%" y el caracter siguiente (espacio, coma, punto) son ambos no-palabra y \b nunca
+# encuentra el borde. Esto dejaba pasar sin detectar cualquier cifra de mercado escrita
+# como "BanRep al 12%" en vez de "12% anual" — invisible para las reglas 6 y 7.
 _RATE_RE = re.compile(
-    r"\b(\d{1,3}(?:[.,]\d+)?)\s*%(?:\s*(?:EA|NMV|NTV|E\.A\.|anual|mensual|efectiv[ao]))?\b",
+    r"\b(\d{1,3}(?:[.,]\d+)?)\s*%(?:\s*(?:EA|NMV|NTV|E\.A\.|anual|mensual|efectiv[ao])\b)?",
     re.IGNORECASE,
 )
 
@@ -350,56 +355,50 @@ def validate_node_premium(
                 f"Envolver con: {{% if customer.first_name %}}{{{{ customer.first_name }}}}{{% else %}}{fallback}{{% endif %}}"
             )
 
-    # ── 6. Cifras de mercado — prohibidas en subject/preheader ─────────────────
-    # Solo lenguaje direccional sin número ahí ("sube", "se fortalece"). El detalle
-    # numérico, si hace falta, va en el cuerpo (regla 7), donde hay espacio para el período.
+    # ── 6/7. Cifras en subject/preheader/cuerpo — producto contra KB, mercado contra research ───
+    # Sin restricción de ubicación — el agente decide dónde va mejor cada cifra (2026-07-09,
+    # decisión de producto: antes se prohibía cifra de mercado en subject/preheader a secas,
+    # pero eso bloqueaba también cifras reales y verificadas; ahora la única barrera es que
+    # la cifra esté grounded, no dónde aparece).
+    # Cifras de producto (CDT %, fondos): deben coincidir con el KB (±0.1%), sin restricción.
+    # Cifras de mercado (COLCAP, TRM, tasas BanRep, S&P, Brent, etc.): deben coincidir con
+    # cifras_verificadas (grounded contra el research real), traer período explícito en
+    # algún lugar del nodo, y hay máximo 1 por nodo. Antes esta regla se saltaba cualquier
+    # número ≥100 sin chequear nada — eso dejaba pasar cifras como "160%" sin ninguna
+    # verificación; ahora todo número se valida contra alguna fuente.
     subject_plain   = _strip_liquid(subject)
     preheader_plain = _strip_liquid(preheader)
-    for field_name, field_text in (("Subject", subject_plain), ("Preheader", preheader_plain)):
-        m_field_rate = _RATE_RE.search(field_text)
-        if m_field_rate:
-            errors.append(
-                f"{field_name} contiene una cifra ('{m_field_rate.group(0).strip()}') — prohibido, "
-                "solo lenguaje direccional sin número ahí ('sube', 'se fortalece'); el detalle "
-                "numérico con su período va en el cuerpo"
-            )
-
-    # ── 7. Cifras en el cuerpo — producto contra KB, mercado contra research ───
-    # Cifras de producto (CDT %, fondos): deben coincidir con el KB (±0.1%).
-    # Cifras de mercado (COLCAP, TRM, tasas BanRep, S&P, Brent, etc.): deben coincidir
-    # con cifras_verificadas (grounded contra el research real), traer período explícito
-    # pegado en la misma frase, y hay máximo 1 por nodo. Antes esta regla se saltaba
-    # cualquier número ≥100 sin chequear nada — eso dejaba pasar cifras como "160%"
-    # sin ninguna verificación; ahora todo número se valida contra alguna fuente.
-    cuerpo_plain = _strip_liquid(cuerpo)
-    kb_rate_list = _kb_rates(kb_entries)
+    cuerpo_plain    = _strip_liquid(cuerpo)
+    node_plain      = f"{subject_plain} {preheader_plain} {cuerpo_plain}"
+    kb_rate_list    = _kb_rates(kb_entries)
     cifras_verificadas = cifras_verificadas or []
-    cuerpo_market_matches: list[str] = []
-    for m_rate in _RATE_RE.finditer(cuerpo_plain):
-        try:
-            rate_num = float(m_rate.group(1).replace(",", "."))
-        except ValueError:
-            continue
-        if _rate_in_kb(rate_num, kb_rate_list):
-            continue  # tasa de producto propio, válida
-        if _rate_in_cifras(rate_num, cifras_verificadas):
-            cuerpo_market_matches.append(m_rate.group(0).strip())
-        else:
-            errors.append(
-                f"Cifra '{m_rate.group(0).strip()}' no está en el Knowledge Base ni en las cifras "
-                "de mercado verificadas del research de esta semana — posible alucinación, "
-                "verificala o eliminala"
-            )
+    market_matches: list[str] = []
+    for field_name, field_text in (("Subject", subject_plain), ("Preheader", preheader_plain), ("Cuerpo", cuerpo_plain)):
+        for m_rate in _RATE_RE.finditer(field_text):
+            try:
+                rate_num = float(m_rate.group(1).replace(",", "."))
+            except ValueError:
+                continue
+            if _rate_in_kb(rate_num, kb_rate_list):
+                continue  # tasa de producto propio, válida en cualquier campo
+            if _rate_in_cifras(rate_num, cifras_verificadas):
+                market_matches.append(m_rate.group(0).strip())
+            else:
+                errors.append(
+                    f"{field_name}: cifra '{m_rate.group(0).strip()}' no está en el Knowledge Base ni en "
+                    "las cifras de mercado verificadas del research de esta semana — posible "
+                    "alucinación, verificala o eliminala"
+                )
 
-    if len(cuerpo_market_matches) > 1:
+    if len(market_matches) > 1:
         errors.append(
-            f"El cuerpo menciona {len(cuerpo_market_matches)} cifras de mercado distintas "
-            f"({', '.join(cuerpo_market_matches)}) — máximo 1 por nodo"
+            f"El nodo menciona {len(market_matches)} cifras de mercado distintas "
+            f"({', '.join(market_matches)}) — máximo 1 por nodo"
         )
-    elif cuerpo_market_matches and not _PERIOD_WORDS_RE.search(cuerpo_plain):
+    elif market_matches and not _PERIOD_WORDS_RE.search(node_plain):
         errors.append(
-            f"La cifra de mercado '{cuerpo_market_matches[0]}' no tiene un período explícito "
-            "pegado en la frase (ej. 'esta semana', 'en julio', 'acumulado del año') — "
+            f"La cifra de mercado '{market_matches[0]}' no tiene un período explícito "
+            "en el nodo (ej. 'esta semana', 'en julio', 'acumulado del año') — "
             "sin período es ambigua"
         )
 
