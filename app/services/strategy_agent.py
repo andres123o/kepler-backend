@@ -6,6 +6,7 @@ Lee datos de Supabase + CIO + mercado → llama Claude → devuelve preview.
 import json
 import logging
 import re
+import unicodedata
 from typing import Any
 
 from app.services.anthropic_client import call_basic_agent, call_premium_agent
@@ -13,6 +14,19 @@ from app.services.customerio_fly_client import build_journey
 from app.services.supabase_client import FunnelClient, _default_fc
 
 logger = logging.getLogger("kepler.strategy_agent")
+
+
+# ─── Nodos congelados (rama Control de experimentos A/B) ─────────────────────
+# Convención de nombre en CIO: cualquier nodo con "estático"/"estatico" en el
+# nombre pertenece a la rama Control fija de un split 50/50 — nunca se propone
+# ni se envía un cambio sobre él. La rama Test (sin ese marcador) sí es editable.
+
+def _normalize(text: str) -> str:
+    return unicodedata.normalize("NFKD", text or "").encode("ascii", "ignore").decode("ascii").lower()
+
+
+def _is_frozen_node(name: str) -> bool:
+    return "estatico" in _normalize(name)
 
 
 def _get_n_nodos(c: dict[str, Any]) -> int | None:
@@ -264,8 +278,14 @@ def _format_journey_for_enrichment(
 
             body = _strip_html(body_raw) if is_email and body_raw else body_raw
 
+            frozen_tag = (
+                "  ⚠ RAMA CONTROL (fija) DE UN EXPERIMENTO A/B — NO incluyas este ID_CIO en 'nodos', "
+                "déjalo exactamente como está"
+                if _is_frozen_node(nombre) else ""
+            )
+
             lines.append("")
-            lines.append(f"  [{node_type} #{msg_count}] ID_CIO: {node.get('id', '?')} | NOMBRE: \"{nombre}\"")
+            lines.append(f"  [{node_type} #{msg_count}] ID_CIO: {node.get('id', '?')} | NOMBRE: \"{nombre}\"{frozen_tag}")
             lines.append(f"    subject: \"{subject}\"")
             if is_email and preheader:
                 lines.append(f"    preheader: \"{preheader}\"")
@@ -360,6 +380,7 @@ def _build_nodos_completos(
                 "tipo":                      "email" if is_email else "push",
                 "delay_desde_anterior_horas": pending_delay,
                 "modificado":                propuesta is not None,
+                "es_rama_control":           _is_frozen_node(nombre),
                 "subject": propuesta.get("subject", "") if propuesta else (node.get("_subject") or node.get("subject") or ""),
                 "cuerpo":  _cuerpo_for_display(propuesta, node, is_email),
             }
@@ -618,6 +639,11 @@ def generate_premium_strategy(fc: FunnelClient, market_research: dict | None = N
     msg_nodes  = [n for n in journey["nodes"] if n.get("type") in ("email_action", "push_action")]
     logger.info("[PREMIUM] Journey: %d nodos totales | %d mensajes", len(journey["nodes"]), len(msg_nodes))
 
+    frozen_node_ids = {str(n.get("id")) for n in msg_nodes if _is_frozen_node(n.get("name") or "")}
+    if frozen_node_ids:
+        logger.info("[PREMIUM] Rama Control (fija) detectada — %d nodo(s) bloqueados: %s",
+                    len(frozen_node_ids), sorted(frozen_node_ids))
+
     # 4. Knowledge Base
     kb_entries = fc.get_knowledge_base()
     kb_text    = _format_knowledge_base(kb_entries)
@@ -673,9 +699,30 @@ def generate_premium_strategy(fc: FunnelClient, market_research: dict | None = N
     # Attachar nodos_completos para el canvas del frontend
     acciones = strategy.get("acciones") or []
     if acciones:
-        propuesta_nodos = (acciones[0].get("propuesta") or {}).get("nodos") or []
+        propuesta = acciones[0].get("propuesta") or {}
+        propuesta_nodos = propuesta.get("nodos") or []
+
+        # Salvaguarda dura: aunque el prompt ya le pide al agente no tocar la rama
+        # Control, esto descarta cualquier cambio propuesto sobre esos nodos aunque
+        # Claude los haya incluido de todos modos.
+        if frozen_node_ids and propuesta_nodos:
+            bloqueados = [n for n in propuesta_nodos if str(n.get("id_nodo_cio")) in frozen_node_ids]
+            if bloqueados:
+                logger.warning(
+                    "[PREMIUM] El agente propuso cambios sobre %d nodo(s) de la rama Control — "
+                    "descartados: %s",
+                    len(bloqueados), [n.get("id_nodo_cio") for n in bloqueados],
+                )
+            propuesta["nodos"] = [n for n in propuesta_nodos if str(n.get("id_nodo_cio")) not in frozen_node_ids]
+            propuesta_nodos = propuesta["nodos"]
+
         if propuesta_nodos:
             acciones[0]["nodos_completos"] = _build_nodos_completos(journey, propuesta_nodos)
+
+    # Nodos bloqueados de la rama Control — se reutiliza al validar/enviar (ver
+    # /validate-and-send-premium) para que el bloqueo sobreviva aunque el frontend
+    # los reenvíe.
+    strategy["frozen_node_ids"] = sorted(frozen_node_ids)
 
     # 7. Guardar resultado
     try:

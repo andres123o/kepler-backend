@@ -396,6 +396,7 @@ async def validate_and_send_premium(
     # una cifra real de una alucinada.
     strategy_saved = fc.get_strategy_by_semana(payload.semana_label)
     cifras_verificadas = (strategy_saved or {}).get("research_cifras") or []
+    frozen_node_ids = {str(x) for x in (strategy_saved or {}).get("frozen_node_ids") or []}
     logger.info("[VALIDATE-PREMIUM] Cifras de mercado verificadas para semana=%s: %d",
                 payload.semana_label, len(cifras_verificadas))
 
@@ -403,6 +404,22 @@ async def validate_and_send_premium(
 
     for node_payload in payload.nodes:
         node = node_payload.model_dump()
+
+        if str(node_payload.id_nodo_cio) in frozen_node_ids:
+            logger.warning(
+                "[VALIDATE-PREMIUM] Nodo %s bloqueado — pertenece a la rama Control (fija) "
+                "del experimento A/B, no se modifica.", node_payload.id_nodo_cio,
+            )
+            results.append({
+                "id_nodo_cio": node_payload.id_nodo_cio,
+                "status":   "cambios",
+                "layer":    "control_branch_block",
+                "errors":   ["Este nodo pertenece a la rama Control (fija) del experimento A/B — Kepler no puede modificarlo."],
+                "warnings": [],
+                "sent":     False,
+            })
+            continue
+
         await asyncio.sleep(0.3)
 
         l1 = validate_node_premium(node, kb_entries, rules=rules, cifras_verificadas=cifras_verificadas)

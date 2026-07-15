@@ -84,13 +84,19 @@ def _headers_write(key: str) -> dict[str, str]:
     return {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
 
 
-def _guard_write(operation: str, detail: str = "") -> None:
-    """Bloquea escrituras cuando CIO_DRY_RUN=true. Lanza error explícito."""
+def _guard_write(operation: str, detail: str = "", fc=None) -> None:
+    """Bloquea escrituras cuando CIO_DRY_RUN=true. Lanza error explícito.
+    Si pasa el bloqueo, registra en audit_log quién disparó la escritura real
+    a Customer.io — este es el único lugar por el que pasan todas las
+    escrituras (create/add/update/activate), así que es el punto robusto
+    para auditar sin depender de que cada router se acuerde de loguear."""
     if _DRY_RUN:
         msg = f"[DRY RUN] {operation} bloqueada{': ' + detail if detail else ''}. Pon CIO_DRY_RUN=false en .env para ejecutar."
         logger.warning(msg)
         raise RuntimeError(msg)
     logger.info("CIO WRITE: %s %s", operation, detail)
+    if fc is not None:
+        fc.log_audit(f"cio_{operation}", {"detail": detail})
 
 
 def get_campaign(campaign_id: str | int, fc) -> dict[str, Any]:
@@ -201,7 +207,7 @@ def create_campaign(config: dict[str, Any], fc) -> dict[str, Any]:
     Verifica que no exista ya una running con el mismo trigger.
     fc: FunnelClient — lee credenciales CIO desde org_secrets.
     """
-    _guard_write("create_campaign", config.get("name", ""))
+    _guard_write("create_campaign", config.get("name", ""), fc=fc)
     creds = fc.get_cio_credentials()
 
     trigger = config.get("event_name", "") or config.get("event", "")
@@ -232,7 +238,7 @@ def create_campaign(config: dict[str, Any], fc) -> dict[str, Any]:
 
 def add_action(campaign_id: str | int, action: dict[str, Any], fc) -> dict[str, Any]:
     """Agrega un nodo/acción a una campaña. Bloqueado si DRY_RUN."""
-    _guard_write("add_action", f"campaign={campaign_id} type={action.get('type')}")
+    _guard_write("add_action", f"campaign={campaign_id} type={action.get('type')}", fc=fc)
     creds = fc.get_cio_credentials()
     resp = httpx.post(
         f"{CIO_BASE_URL}/campaigns/{campaign_id}/actions",
@@ -250,7 +256,7 @@ def add_action(campaign_id: str | int, action: dict[str, Any], fc) -> dict[str, 
 def add_edge(campaign_id: str | int, from_id: str, to_id: str,
              fc=None, edge_type: str = "continue", index: int | None = None) -> dict[str, Any]:
     """Conecta dos nodos. Bloqueado si DRY_RUN."""
-    _guard_write("add_edge", f"campaign={campaign_id} {from_id}->{to_id}")
+    _guard_write("add_edge", f"campaign={campaign_id} {from_id}->{to_id}", fc=fc)
     creds = fc.get_cio_credentials()
     edge: dict[str, Any] = {"from": from_id, "to": to_id, "type": edge_type}
     if index is not None:
@@ -268,7 +274,7 @@ def add_edge(campaign_id: str | int, from_id: str, to_id: str,
 def update_action(campaign_id: str | int, action_id: str,
                   updates: dict[str, Any], fc=None) -> dict[str, Any]:
     """Actualiza copy/subject de un nodo existente. Bloqueado si DRY_RUN."""
-    _guard_write("update_action", f"campaign={campaign_id} action={action_id}")
+    _guard_write("update_action", f"campaign={campaign_id} action={action_id}", fc=fc)
     creds = fc.get_cio_credentials()
     resp = httpx.put(
         f"{CIO_BASE_URL}/campaigns/{campaign_id}/actions/{action_id}",
@@ -282,7 +288,7 @@ def update_action(campaign_id: str | int, action_id: str,
 
 def activate_campaign(campaign_id: str | int, fc=None) -> dict[str, Any]:
     """Activa una campaña draft → running. Bloqueado si DRY_RUN."""
-    _guard_write("activate_campaign", f"campaign={campaign_id}")
+    _guard_write("activate_campaign", f"campaign={campaign_id}", fc=fc)
     creds = fc.get_cio_credentials()
     resp = httpx.put(
         f"{CIO_BASE_URL}/campaigns/{campaign_id}",

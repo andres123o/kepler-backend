@@ -14,6 +14,7 @@ import os
 import re
 import time
 import logging
+import urllib.parse
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -128,14 +129,29 @@ class FunnelClient:
     Todos los nombres de tabla se construyen dinámicamente: {org}_{funnel}_{table}.
     """
 
-    def __init__(self, org_slug: str, funnel_slug: str) -> None:
+    def __init__(self, org_slug: str, funnel_slug: str, user_name: str | None = None) -> None:
         self.org_slug    = org_slug
         self.funnel_slug = funnel_slug
+        self.user_name   = user_name  # quién hace la request — viene de la sesión (X-Kepler-User), no del cliente
         self._prefix     = f"{org_slug}_{funnel_slug}"
         self._client     = _get_client()
 
     def _t(self, table: str) -> str:
         return f"{self._prefix}_{table}"
+
+    def log_audit(self, action: str, detail: dict[str, Any] | None = None) -> None:
+        """Registra en audit_log quién hizo qué sobre CIO (execute, update-node, envíos, borrados).
+        Nunca lanza: un fallo de auditoría no debe bloquear la acción real."""
+        try:
+            self._client.table("audit_log").insert({
+                "org_slug":    self.org_slug,
+                "funnel_slug": self.funnel_slug,
+                "user_name":   self.user_name,
+                "action":      action,
+                "detail":      _make_json_safe(detail or {}),
+            }).execute()
+        except Exception:
+            logger.exception("No se pudo escribir audit_log para action=%s", action)
 
     # ── Config del funnel (tabla platform-level) ─────────────────────────────
 
@@ -986,6 +1002,7 @@ def _validate_org_funnel(org_slug: str, funnel_slug: str) -> None:
 def get_funnel_client(
     x_org_slug: str | None = Header(default=None),
     x_funnel_slug: str | None = Header(default=None),
+    x_kepler_user: str | None = Header(default=None),
 ) -> FunnelClient:
     if not x_org_slug or not x_funnel_slug:
         raise HTTPException(
@@ -993,7 +1010,8 @@ def get_funnel_client(
             detail="Headers X-Org-Slug y X-Funnel-Slug son requeridos"
         )
     _validate_org_funnel(x_org_slug, x_funnel_slug)
-    return FunnelClient(x_org_slug, x_funnel_slug)
+    user_name = urllib.parse.unquote(x_kepler_user) if x_kepler_user else None
+    return FunnelClient(x_org_slug, x_funnel_slug, user_name=user_name)
 
 
 # ─── Wrappers de compatibilidad (Fase 2 — migrar incrementalmente) ────────────

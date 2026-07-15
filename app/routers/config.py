@@ -61,7 +61,9 @@ def add_campaign(body: AddCampaignPayload, fc: FunnelClient = Depends(get_funnel
     if not cid.isdigit():
         raise HTTPException(status_code=422, detail="El ID de campaña debe ser numérico")
     try:
-        return fc.add_tracked_campaign(cid)
+        result = fc.add_tracked_campaign(cid)
+        fc.log_audit("tracked_campaign_add", {"cio_campaign_id": cid})
+        return result
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
@@ -70,6 +72,7 @@ def add_campaign(body: AddCampaignPayload, fc: FunnelClient = Depends(get_funnel
 def remove_campaign(campaign_id: str, fc: FunnelClient = Depends(get_funnel_client)) -> dict[str, Any]:
     try:
         fc.delete_tracked_campaign(campaign_id)
+        fc.log_audit("tracked_campaign_delete", {"cio_campaign_id": campaign_id})
         return {"ok": True, "deleted": campaign_id}
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
@@ -91,7 +94,9 @@ def add_kb_entry(body: AddKBPayload, fc: FunnelClient = Depends(get_funnel_clien
     if not tipo or not titulo or not contenido:
         raise HTTPException(status_code=422, detail="tipo, titulo y contenido son obligatorios")
     try:
-        return fc.insert_knowledge_base_entry(tipo, titulo, contenido)
+        result = fc.insert_knowledge_base_entry(tipo, titulo, contenido)
+        fc.log_audit("kb_add", {"tipo": tipo, "titulo": titulo})
+        return result
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
@@ -100,6 +105,7 @@ def add_kb_entry(body: AddKBPayload, fc: FunnelClient = Depends(get_funnel_clien
 def delete_kb_entry(entry_id: str, fc: FunnelClient = Depends(get_funnel_client)) -> dict[str, Any]:
     try:
         fc.delete_knowledge_base_entry(entry_id)
+        fc.log_audit("kb_delete", {"entry_id": entry_id})
         return {"ok": True, "deleted": entry_id}
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
@@ -111,7 +117,9 @@ def update_kb_entry(entry_id: str, body: UpdateKBPayload, fc: FunnelClient = Dep
     if not updates:
         raise HTTPException(status_code=422, detail="No hay campos para actualizar")
     try:
-        return fc.update_knowledge_base_entry(entry_id, updates)
+        result = fc.update_knowledge_base_entry(entry_id, updates)
+        fc.log_audit("kb_update", {"entry_id": entry_id, "fields": list(updates.keys())})
+        return result
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
@@ -139,5 +147,6 @@ def update_prompt_composite(
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
+    fc.log_audit("prompt_update", {"agent_type": agent_type})
     fresh = fc.get_prompt_composite(agent_type)
     return {**result, **fresh}

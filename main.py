@@ -1,4 +1,6 @@
 import logging
+import os
+import secrets
 import sys
 
 logging.basicConfig(
@@ -8,14 +10,24 @@ logging.basicConfig(
     stream=sys.stdout,
 )
 
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.routers import config, data, measure, ml, monitor, strategy
 
-app = FastAPI(title="Kepler Backend", version="2.0.0")
+_BACKEND_SECRET = os.getenv("KEPLER_BACKEND_SECRET", "")
 
-import os
+
+def verify_backend_secret(authorization: str | None = Header(default=None)) -> None:
+    """Exige que cada request traiga el secreto compartido con el proxy de Next.js.
+    Sin esto, cualquiera que descubra la URL del backend podía llamar cualquier
+    endpoint (leer/borrar KB, editar prompts, ejecutar estrategias en CIO) sin login."""
+    expected = f"Bearer {_BACKEND_SECRET}"
+    if not _BACKEND_SECRET or not authorization or not secrets.compare_digest(authorization, expected):
+        raise HTTPException(status_code=401, detail="No autorizado")
+
+
+app = FastAPI(title="Kepler Backend", version="2.0.0", dependencies=[Depends(verify_backend_secret)])
 
 _raw = os.getenv("ALLOWED_ORIGINS", "http://localhost:3000")
 _origins = [o.strip() for o in _raw.split(",") if o.strip()]
