@@ -6,8 +6,12 @@ para generación de JSON estructurado).
 Override via env: KEPLER_MODEL=claude-opus-4-7 para máxima capacidad cuando se necesite.
 
 Agentes disponibles:
-  call_premium_agent() — SHAP + Perplexity + Journey → campaña Primer Depósito
-  call_basic_agent()   — Calendario colombiano → 5 campañas de onboarding
+  Premium (pipeline encadenado, ver strategy_agent._run_premium_chained):
+    call_market_analyst_agent()   — SHAP + research + KB → señales de mercado
+    call_cadence_planner_agent()  — señales + journey → plan de cadencia por nodo
+    call_copywriter_agent()       — plan → copy final por nodo
+    call_humanizer_agent()        — copy final → reescrito en lenguaje humano
+  call_basic_agent() — calendario → campañas de onboarding
 
 Estrategia de caching:
   - system prompt  → cacheado (reglas + schema, cambia nunca)
@@ -96,42 +100,147 @@ def _fecha_legible(fecha_iso: str) -> str:
         return fecha_iso
 
 
-def call_premium_agent(
+def call_market_analyst_agent(
     shap_text: str,
     research_text: str,
     kb_text: str,
-    journey_text: str,
     semana_label: str,
     system_prompt: str,
     kb_preamble: str,
     user_template: str,
 ) -> dict[str, Any]:
     """
-    Agente premium — una sola llamada Claude.
+    Paso 1/4 del pipeline premium encadenado — analista de mercado.
 
-    system_prompt, kb_preamble, user_template: cargados desde funnel_prompts en Supabase.
-    user_template usa placeholders: {semana_label}, {shap_text}, {research_text}, {journey_text}.
+    Lee SHAP + research de mercado + KB completo UNA sola vez y decide, por cada señal
+    relevante, hacia dónde empuja la predicción y qué producto del catálogo se beneficia.
+    No escribe copy — solo produce la lista de señales que el paso 2 (cadence_planner)
+    va a repartir entre los nodos del journey.
+
+    system_prompt/kb_preamble/user_template: cargados desde funnel_prompts (agent_type='premium',
+    prompt_type='market_analyst_system'/'kb_preamble'/'market_analyst_user_template').
     """
-    model    = _get_model()
-    client   = _get_client()
+    model  = _get_model()
+    client = _get_client()
 
     kb_block: dict[str, Any] = {
         "type": "text",
         "text": f"{kb_preamble}\n\n{kb_text}",
         "cache_control": {"type": "ephemeral"},
     }
-
     data_block: dict[str, Any] = {
         "type": "text",
         "text": user_template.format(
             semana_label=semana_label,
             shap_text=shap_text,
             research_text=research_text,
+        ),
+    }
+
+    logger.info("[PREMIUM-V2 Paso1] Claude %s — analista de mercado | semana=%s", model, semana_label)
+
+    response = client.messages.create(
+        model=model,
+        max_tokens=4000,
+        system=[{
+            "type": "text",
+            "text": system_prompt,
+            "cache_control": {"type": "ephemeral"},
+        }],
+        messages=[{"role": "user", "content": [kb_block, data_block]}],
+    )
+
+    raw = response.content[0].text.strip()
+    if raw.startswith("```"):
+        raw = raw.split("```")[1].removeprefix("json").strip()
+
+    result = _parse_json(raw, "PREMIUM-V2-PASO1")
+    _log_cost(response.usage, model)
+    return result
+
+
+def call_cadence_planner_agent(
+    market_insights_text: str,
+    journey_text: str,
+    system_prompt: str,
+    user_template: str,
+) -> dict[str, Any]:
+    """
+    Paso 2/4 del pipeline premium encadenado — planificador de cadencia.
+
+    Recibe las señales del paso 1 + el journey real (con sus delays reales, el que sea
+    — 3, 4 o 6 nodos, nunca asumido) y asigna una etapa psicológica + un ángulo + un dato
+    + un producto por nodo, sin repetir entre nodos. No escribe copy, solo planifica.
+    Llamada chica y barata — no necesita KB ni SHAP crudo, ya viene resumido en el paso 1.
+
+    system_prompt/user_template: cargados desde funnel_prompts (agent_type='premium',
+    prompt_type='cadence_planner_system'/'cadence_planner_user_template').
+    """
+    model  = _get_model()
+    client = _get_client()
+
+    data_block: dict[str, Any] = {
+        "type": "text",
+        "text": user_template.format(
+            market_insights_text=market_insights_text,
             journey_text=journey_text,
         ),
     }
 
-    logger.info("[PREMIUM] Claude %s — agente premium | semana=%s", model, semana_label)
+    logger.info("[PREMIUM-V2 Paso2] Claude %s — planificador de cadencia", model)
+
+    response = client.messages.create(
+        model=model,
+        max_tokens=3000,
+        system=[{"type": "text", "text": system_prompt}],
+        messages=[{"role": "user", "content": [data_block]}],
+    )
+
+    raw = response.content[0].text.strip()
+    if raw.startswith("```"):
+        raw = raw.split("```")[1].removeprefix("json").strip()
+
+    result = _parse_json(raw, "PREMIUM-V2-PASO2")
+    _log_cost(response.usage, model)
+    return result
+
+
+def call_copywriter_agent(
+    cadence_plan_text: str,
+    kb_text: str,
+    semana_label: str,
+    system_prompt: str,
+    kb_preamble: str,
+    user_template: str,
+) -> dict[str, Any]:
+    """
+    Paso 3/4 del pipeline premium encadenado — redactor de copy.
+
+    Recibe el plan de cadencia ya decidido en el paso 2 (una etapa + un ángulo + un dato
+    + un producto por nodo) y solo escribe el texto final — no elige qué usar, eso ya
+    está resuelto. Devuelve acciones[].propuesta.nodos[], que el paso 4 (humanizador)
+    reescribe antes de que generate_premium_strategy guarde el resultado.
+
+    system_prompt/kb_preamble/user_template: cargados desde funnel_prompts (agent_type='premium',
+    prompt_type='copywriter_system'/'kb_preamble'/'copywriter_user_template').
+    """
+    model  = _get_model()
+    client = _get_client()
+
+    kb_block: dict[str, Any] = {
+        "type": "text",
+        "text": f"{kb_preamble}\n\n{kb_text}",
+        "cache_control": {"type": "ephemeral"},
+    }
+    data_block: dict[str, Any] = {
+        "type": "text",
+        "text": user_template.format(
+            semana_label=semana_label,
+            cadence_plan_text=cadence_plan_text,
+        ),
+    }
+
+    logger.info("[PREMIUM-V2 Paso3] Claude %s — redactor de copy | semana=%s", model, semana_label)
 
     response = client.messages.create(
         model=model,
@@ -148,9 +257,99 @@ def call_premium_agent(
     if raw.startswith("```"):
         raw = raw.split("```")[1].removeprefix("json").strip()
 
-    result = _parse_json(raw, "PREMIUM")
+    result = _parse_json(raw, "PREMIUM-V2-PASO3")
     _log_cost(response.usage, model)
     return result
+
+
+def call_humanizer_agent(
+    nodos_text: str,
+    system_prompt: str,
+    user_template: str,
+) -> dict[str, Any]:
+    """
+    Paso 4/4 del pipeline premium encadenado — humanizador.
+
+    Recibe el copy YA escrito por el paso 3 (redactor) y lo reescribe para que suene
+    humano, simple y escaneable — sin tocar cifras, nombres de producto, links de CTA
+    ni el disclaimer de compliance. Solo cambia CÓMO se dice, nunca QUÉ dice. Devuelve
+    únicamente los campos de texto por nodo (subject/preheader/cuerpo) — nunca IDs,
+    delays ni la estructura del nodo, para que sea imposible que corrompa algo que no
+    sea el texto.
+
+    system_prompt/user_template: cargados desde funnel_prompts (agent_type='premium',
+    prompt_type='humanizer_system'/'humanizer_user_template').
+    """
+    model  = _get_model()
+    client = _get_client()
+
+    data_block: dict[str, Any] = {
+        "type": "text",
+        "text": user_template.format(nodos_text=nodos_text),
+    }
+
+    logger.info("[PREMIUM-V2 Paso4] Claude %s — humanizador de copy", model)
+
+    response = client.messages.create(
+        model=model,
+        max_tokens=6000,
+        system=[{"type": "text", "text": system_prompt}],
+        messages=[{"role": "user", "content": [data_block]}],
+    )
+
+    raw = response.content[0].text.strip()
+    if raw.startswith("```"):
+        raw = raw.split("```")[1].removeprefix("json").strip()
+
+    result = _parse_json(raw, "PREMIUM-V2-PASO4")
+    _log_cost(response.usage, model)
+    return result
+
+
+def verify_producto_citations(
+    insights: list[dict[str, Any]],
+    kb_entries: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """
+    Grounding del paso 1 (analista de mercado) — mismo principio que extract_market_cifras
+    (verificar contra la fuente antes de dejar pasar), aplicado a nombres de producto:
+    descarta cualquier insight cuyo 'producto_kb_citado' no aparezca literalmente en el
+    Knowledge Base de ESE funnel. Evita que el analista invente un nombre de producto que
+    no está en el catálogo real.
+
+    Busca tanto en el título de cada entrada como en su contenido — los productos
+    específicos suelen vivir como subtítulos DENTRO del contenido de una entrada de
+    categoría (ej. "CDT Mibanco" aparece dentro de la entrada de categoría "CDTs", no
+    como su título). Comparar solo contra el título rechazaba productos reales y
+    existentes por error (falso negativo) — este fix compara contra ambos campos.
+
+    Genérico por diseño — no conoce nombres de producto de ningún país, solo compara
+    contra lo que kb_entries traiga (que ya viene filtrado por funnel_id en FunnelClient).
+    """
+    haystacks: list[str] = []
+    for e in kb_entries:
+        titulo = (e.get("titulo") or "").strip().lower()
+        contenido = (e.get("contenido") or "").strip().lower()
+        if titulo:
+            haystacks.append(titulo)
+        if contenido:
+            haystacks.append(contenido)
+
+    verificados: list[dict[str, Any]] = []
+    for ins in insights:
+        producto = (ins.get("producto_kb_citado") or "").strip()
+        if not producto:
+            verificados.append(ins)  # señal puramente macro, sin producto asociado — válida igual
+            continue
+        producto_norm = producto.lower()
+        if any(producto_norm in h for h in haystacks):
+            verificados.append(ins)
+        else:
+            logger.warning(
+                "[PREMIUM-V2 Paso1] Insight descartado — producto '%s' no existe literalmente en el KB",
+                producto,
+            )
+    return verificados
 
 
 def call_basic_agent(

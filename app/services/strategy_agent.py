@@ -9,7 +9,14 @@ import re
 import unicodedata
 from typing import Any
 
-from app.services.anthropic_client import call_basic_agent, call_premium_agent
+from app.services.anthropic_client import (
+    call_basic_agent,
+    call_market_analyst_agent,
+    call_cadence_planner_agent,
+    call_copywriter_agent,
+    call_humanizer_agent,
+    verify_producto_citations,
+)
 from app.services.customerio_fly_client import build_journey
 from app.services.supabase_client import FunnelClient, _default_fc
 
@@ -180,6 +187,244 @@ def _format_cifras_block(cifras: list[dict[str, Any]]) -> str:
         )
     return "\n".join(lines)
 
+
+def _format_market_insights_for_planner(insights_result: dict[str, Any]) -> str:
+    """
+    Formatea la salida del paso 1 (analista de mercado) para el paso 2 (planificador
+    de cadencia). Cada señal ya trae su producto de KB verificado y su cifra grounded
+    (si aplica) — el planner solo reparte entre nodos, no vuelve a decidir qué producto
+    o qué cifra usar.
+    """
+    insights = insights_result.get("insights") or []
+    if not insights:
+        return (
+            "Sin señales de mercado verificadas esta semana — el planificador debe "
+            "apoyarse en un beneficio genérico del KB para cada nodo, sin inventar dato de mercado."
+        )
+    lines: list[str] = []
+    condicion = insights_result.get("condicion_dominante")
+    estado_general = insights_result.get("estado_mental_general")
+    if condicion:
+        lines.append(f"CONDICIÓN DOMINANTE ESTA SEMANA: {condicion}")
+    if estado_general:
+        lines.append(f"ESTADO MENTAL GENERAL DEL USUARIO: {estado_general}")
+    lines.append("")
+    lines.append("SEÑALES DETECTADAS (producto y cifra ya verificados contra fuente real):")
+    for i, ins in enumerate(insights, 1):
+        lines.append(
+            f"  {i}. {ins.get('senal', '?')} → {ins.get('direccion', '?')}\n"
+            f"     estado mental: {ins.get('estado_mental', '?')}\n"
+            f"     producto asociado: {ins.get('producto_kb_citado') or '(sin producto específico)'}\n"
+            f"     cifra permitida: {ins.get('cifra_permitida') or '(ninguna — usar solo lenguaje direccional)'}\n"
+            f"     por qué: {ins.get('por_que', '')}"
+        )
+    return "\n".join(lines)
+
+
+def _format_cadence_plan_for_copywriter(plan_result: dict[str, Any]) -> str:
+    """
+    Formatea la salida del paso 2 (planificador de cadencia) para el paso 3 (redactor).
+    El redactor NO elige ángulo/dato/producto/delay — ya está decidido acá, solo escribe
+    el copy de cada nodo y arma el resumen para el equipo con el contexto ya sintetizado.
+    """
+    plan = plan_result.get("plan") or []
+    if not plan:
+        return "Sin plan de cadencia disponible — escribe cada nodo con un solo ángulo y un solo dato, sin repetir entre nodos."
+
+    lines: list[str] = []
+    condicion = plan_result.get("condicion_dominante")
+    estado_general = plan_result.get("estado_mental_general")
+    estado_funnel = plan_result.get("estado_funnel")
+    if condicion:
+        lines.append(f"CONDICIÓN DOMINANTE ESTA SEMANA: {condicion}")
+    if estado_general:
+        lines.append(f"ESTADO MENTAL GENERAL DEL USUARIO: {estado_general}")
+    if estado_funnel:
+        lines.append(f"ESTADO DEL FUNNEL: {estado_funnel}")
+
+    cambios = plan_result.get("cambios_estructura")
+    lines.append(f"CAMBIOS DE TIMING YA DECIDIDOS: {cambios if cambios else 'ninguno — todos los delays quedan igual'}")
+    lines.append("")
+    lines.append(
+        "PLAN DE CADENCIA POR NODO — YA DECIDIDO, no lo cambies ni le agregues datos "
+        "adicionales, solo escribe subject/preheader/cuerpo de cada nodo según su asignación:"
+    )
+    for p in plan:
+        lines.append(
+            f"  Nodo id_cio={p.get('id_nodo_cio', '?')} nombre=\"{p.get('nombre', '?')}\" "
+            f"(orden {p.get('orden', '?')}, {p.get('momento', '?')})\n"
+            f"     etapa: {p.get('etapa', '?')}\n"
+            f"     ángulo central: {p.get('angulo_central', '?')}\n"
+            f"     dato permitido (máximo este, ninguno más): {p.get('dato_permitido') or '(ninguno)'}\n"
+            f"     producto a nombrar: {p.get('producto_kb') or '(ninguno específico)'}\n"
+            f"     delay propuesto (horas desde el nodo anterior): {p.get('delay_propuesto_horas', '?')}"
+        )
+    return "\n".join(lines)
+
+
+def _format_nodos_for_humanizer(nodos: list[dict[str, Any]]) -> str:
+    """
+    Formatea los nodos ya escritos por el paso 3 (redactor) para el paso 4 (humanizador).
+    Solo lleva id_nodo_cio + los campos de texto — el humanizador nunca ve ni puede tocar
+    orden, tipo, delay ni nombre, así que no hay forma de que los corrompa.
+    """
+    if not nodos:
+        return "Sin nodos que humanizar."
+    lines: list[str] = []
+    for n in nodos:
+        lines.append(f"Nodo id_cio={n.get('id_nodo_cio', '?')}")
+        lines.append(f"  subject: {n.get('subject', '')}")
+        if "preheader" in n:
+            lines.append(f"  preheader: {n.get('preheader', '')}")
+        lines.append(f"  cuerpo: {n.get('cuerpo', '')}")
+        lines.append("")
+    return "\n".join(lines)
+
+
+def _merge_humanized_nodos(
+    nodos: list[dict[str, Any]],
+    humanizados: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """
+    Reemplaza subject/preheader/cuerpo de cada nodo con la versión humanizada, matcheando
+    por id_nodo_cio. Nunca toca orden/tipo/delay/nombre — si un nodo no viene en la
+    respuesta del humanizador (por id no encontrado), se deja tal cual salió del paso 3
+    en vez de perderlo.
+    """
+    by_id = {str(h.get("id_nodo_cio")): h for h in humanizados if h.get("id_nodo_cio") is not None}
+    result: list[dict[str, Any]] = []
+    for n in nodos:
+        h = by_id.get(str(n.get("id_nodo_cio")))
+        if not h:
+            result.append(n)
+            continue
+        merged = dict(n)
+        if h.get("subject"):
+            merged["subject"] = h["subject"]
+        if "preheader" in merged and h.get("preheader"):
+            merged["preheader"] = h["preheader"]
+        if h.get("cuerpo"):
+            merged["cuerpo"] = h["cuerpo"]
+        result.append(merged)
+    return result
+
+
+def _run_premium_chained(
+    fc: FunnelClient,
+    shap_text: str,
+    research_text: str,
+    kb_text: str,
+    kb_entries: list[dict[str, Any]],
+    journey_text: str,
+    semana_label: str,
+) -> dict[str, Any]:
+    """
+    Pipeline encadenado (prompt chaining) del agente premium — 4 llamadas Claude, cada
+    una con un trabajo único, en vez de una sola llamada decidiendo todo junto:
+
+      1. market_analyst   — lee SHAP+research+KB UNA vez → señales de mercado, cada una
+                             con su producto de KB asociado y verificado (grounding).
+      2. cadence_planner   — reparte 1 etapa psicológica + 1 ángulo + 1 dato + 1 producto
+                             por nodo del journey real (el que sea, sin asumir cantidad),
+                             sin repetir entre nodos.
+      3. copywriter        — escribe el copy final de cada nodo usando SOLO su porción
+                             ya asignada del plan (acciones[].propuesta.nodos[]).
+      4. humanizer         — reescribe ese copy para que suene humano y simple, sin
+                             tocar cifras, nombres de producto ni compliance.
+
+    Cada paso carga su propio system_prompt/user_template desde funnel_prompts para
+    ESTE funnel — nada de contenido de Colombia/Perú/Chile vive en este archivo, solo
+    la orquestación. Si a un funnel le falta alguna fila para un paso, error explícito
+    (mismo criterio que el resto del sistema: sin fallback silencioso).
+    """
+    kb_preamble = fc.get_agent_prompt("premium", "kb_preamble")
+
+    # ── Paso 1 — Analista de mercado ─────────────────────────────────────────
+    ma_system   = fc.get_agent_prompt("premium", "market_analyst_system")
+    ma_template = fc.get_agent_prompt("premium", "market_analyst_user_template")
+    if not ma_system or not ma_template or not kb_preamble:
+        raise RuntimeError(
+            "funnel_prompts le faltan filas para el paso 'market_analyst' (system o "
+            "user_template) o falta 'kb_preamble'. Corre seed_prompts.py para este funnel."
+        )
+    logger.info("[PREMIUM-V2] Paso 1/3 — analista de mercado")
+    insights_result = call_market_analyst_agent(
+        shap_text=shap_text,
+        research_text=research_text,
+        kb_text=kb_text,
+        semana_label=semana_label,
+        system_prompt=ma_system,
+        kb_preamble=kb_preamble,
+        user_template=ma_template,
+    )
+    insights_raw = insights_result.get("insights") or []
+    insights = verify_producto_citations(insights_raw, kb_entries)
+    insights_result["insights"] = insights
+    logger.info("[PREMIUM-V2] Paso 1/3 — %d señales generadas, %d con producto verificado",
+                len(insights_raw), len(insights))
+    insights_text = _format_market_insights_for_planner(insights_result)
+
+    # ── Paso 2 — Planificador de cadencia ────────────────────────────────────
+    cp_system   = fc.get_agent_prompt("premium", "cadence_planner_system")
+    cp_template = fc.get_agent_prompt("premium", "cadence_planner_user_template")
+    if not cp_system or not cp_template:
+        raise RuntimeError(
+            "funnel_prompts le faltan filas para el paso 'cadence_planner' (system o "
+            "user_template). Corre seed_prompts.py para este funnel."
+        )
+    logger.info("[PREMIUM-V2] Paso 2/3 — planificador de cadencia")
+    plan_result = call_cadence_planner_agent(
+        market_insights_text=insights_text,
+        journey_text=journey_text,
+        system_prompt=cp_system,
+        user_template=cp_template,
+    )
+    plan = plan_result.get("plan") or []
+    plan_text = _format_cadence_plan_for_copywriter(plan_result)
+
+    # ── Paso 3 — Redactor de copy ─────────────────────────────────────────────
+    cw_system   = fc.get_agent_prompt("premium", "copywriter_system")
+    cw_template = fc.get_agent_prompt("premium", "copywriter_user_template")
+    if not cw_system or not cw_template:
+        raise RuntimeError(
+            "funnel_prompts le faltan filas para el paso 'copywriter' (system o "
+            "user_template). Corre seed_prompts.py para este funnel."
+        )
+    logger.info("[PREMIUM-V2] Paso 3/4 — redactor de copy")
+    strategy = call_copywriter_agent(
+        cadence_plan_text=plan_text,
+        kb_text=kb_text,
+        semana_label=semana_label,
+        system_prompt=cw_system,
+        kb_preamble=kb_preamble,
+        user_template=cw_template,
+    )
+
+    # ── Paso 4 — Humanizador ──────────────────────────────────────────────────
+    hz_system   = fc.get_agent_prompt("premium", "humanizer_system")
+    hz_template = fc.get_agent_prompt("premium", "humanizer_user_template")
+    acciones = strategy.get("acciones") or []
+    nodos = (acciones[0].get("propuesta") or {}).get("nodos") or [] if acciones else []
+    if nodos and hz_system and hz_template:
+        logger.info("[PREMIUM-V2] Paso 4/4 — humanizador de copy")
+        nodos_text = _format_nodos_for_humanizer(nodos)
+        humanized_result = call_humanizer_agent(
+            nodos_text=nodos_text,
+            system_prompt=hz_system,
+            user_template=hz_template,
+        )
+        humanizados = humanized_result.get("nodos_humanizados") or []
+        acciones[0]["propuesta"]["nodos"] = _merge_humanized_nodos(nodos, humanizados)
+    elif nodos:
+        logger.warning(
+            "[PREMIUM-V2] Paso 4/4 omitido — faltan filas 'humanizer_system'/"
+            "'humanizer_user_template' en funnel_prompts para este funnel."
+        )
+
+    # Debug/observabilidad — no lo consume ningún caller existente (todos leen claves
+    # puntuales como 'acciones'), pero permite inspeccionar qué decidió cada paso.
+    strategy["_pipeline_debug"] = {"market_insights": insights, "cadence_plan": plan}
+    return strategy
 
 
 # ─── Helpers para formatear journey (fly API) ─────────────────────────────────
@@ -585,7 +830,7 @@ def get_funnel_health(fc: FunnelClient) -> list[dict[str, Any]]:
 
 def generate_premium_strategy(fc: FunnelClient, market_research: dict | None = None) -> dict[str, Any]:
     """
-    Flujo único del agente premium (campaña marcada como agent_tier='premium' en Supabase).
+    Flujo del agente premium (campaña marcada como agent_tier='premium' en Supabase).
 
     Pasos:
       1. SHAP + proyección desde Supabase
@@ -593,7 +838,7 @@ def generate_premium_strategy(fc: FunnelClient, market_research: dict | None = N
       3. Journey completo desde CIO fly API
       4. Knowledge Base
       5. Research Perplexity (sonar-pro) — se salta si market_research ya viene provisto
-      6. Una sola llamada Claude con PREMIUM_AGENT_SYSTEM_PROMPT
+      6. Pipeline encadenado de 4 llamadas Claude (ver _run_premium_chained)
       7. Guardar + retornar
 
     Args:
@@ -669,25 +914,18 @@ def generate_premium_strategy(fc: FunnelClient, market_research: dict | None = N
     research_text = research_text + "\n\n" + _format_cifras_block(cifras_verificadas)
     logger.info("[PREMIUM] Cifras de mercado verificadas: %d", len(cifras_verificadas))
 
-    # 6. Prompts desde BD del funnel — sin fallback, error explícito si faltan
-    system_prompt = fc.get_agent_prompt("premium", "system")
-    kb_preamble   = fc.get_agent_prompt("premium", "kb_preamble")
-    user_template = fc.get_agent_prompt("premium", "user_template")
-    if not system_prompt or not kb_preamble or not user_template:
-        raise RuntimeError(
-            "funnel_prompts le faltan filas a premium: system, kb_preamble o user_template. "
-            "Corre seed_prompts.py para este funnel."
-        )
-    logger.info("[PREMIUM] Llamando agente premium Claude...")
-    strategy = call_premium_agent(
+    # 6. Pipeline encadenado (chained_v2) — único flujo del agente premium:
+    #    analista de mercado → planificador de cadencia → redactor → humanizador.
+    #    Mismo código para cualquier funnel/país — todo el contenido vive en
+    #    funnel_prompts, nada hardcodeado aquí.
+    strategy = _run_premium_chained(
+        fc=fc,
         shap_text=shap_text,
         research_text=research_text,
         kb_text=kb_text,
+        kb_entries=kb_entries,
         journey_text=journey_text,
         semana_label=semana_label,
-        system_prompt=system_prompt,
-        kb_preamble=kb_preamble,
-        user_template=user_template,
     )
     strategy["semana_label"] = semana_label
 

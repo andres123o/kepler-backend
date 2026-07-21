@@ -1,0 +1,6 @@
+{market_insights_text}
+
+── JOURNEY ACTUAL (CIO) ──
+{journey_text}
+
+Responde SOLO JSON válido.

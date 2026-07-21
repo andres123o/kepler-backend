@@ -86,22 +86,62 @@ def _to_ml(df: pd.DataFrame, col_mapping: dict[str, str] | None = None) -> pd.Da
 # unirlas en un solo texto para la UI y separarlas de nuevo al guardar, sin perder
 # de cuál fila viene cada parte.
 
-_PROMPT_TYPES_ORDER = ["system", "kb_preamble", "user_template", "perplexity_system", "perplexity_query"]
+# Orden de secciones que ve la UI de configuración, por agent_type. 'premium' es el
+# pipeline encadenado de 4 pasos (market_analyst/cadence_planner/copywriter/humanizer)
+# + kb_preamble (compartido) + perplexity. Ningún nombre de país entra en estas listas
+# — son estructura de agente, no contenido de funnel.
+_PROMPT_TYPES_BY_AGENT: dict[str, list[str]] = {
+    "basic": ["system", "kb_preamble", "user_template", "perplexity_system", "perplexity_query"],
+    "premium": [
+        "kb_preamble",
+        "market_analyst_system", "market_analyst_user_template",
+        "cadence_planner_system", "cadence_planner_user_template",
+        "copywriter_system", "copywriter_user_template",
+        "humanizer_system", "humanizer_user_template",
+        "perplexity_system", "perplexity_query",
+    ],
+}
+
+# Subconjunto que save_prompt_composite exige no-vacío — para 'premium', las 8 filas
+# del pipeline encadenado son obligatorias (es el único flujo, sin fallback).
+_PROMPT_TYPES_REQUIRED_BY_AGENT: dict[str, list[str]] = {
+    "basic":   ["system", "kb_preamble", "user_template", "perplexity_system", "perplexity_query"],
+    "premium": [
+        "kb_preamble",
+        "market_analyst_system", "market_analyst_user_template",
+        "cadence_planner_system", "cadence_planner_user_template",
+        "copywriter_system", "copywriter_user_template",
+        "humanizer_system", "humanizer_user_template",
+    ],
+}
 
 _PROMPT_SECTION_TITLES = {
-    "system":             "INSTRUCCIONES GENERALES DEL AGENTE",
-    "kb_preamble":        "CÓMO USAR LA KNOWLEDGE BASE",
-    "user_template":      "TEMPLATE DE DATOS SEMANALES — NO BORRAR LAS LLAVES { }",
-    "perplexity_system":  "INSTRUCCIONES PARA LA BÚSQUEDA DE MERCADO (PERPLEXITY)",
-    "perplexity_query":   "QUÉ LE PREGUNTAMOS AL BUSCADOR DE MERCADO",
+    "system":                       "INSTRUCCIONES GENERALES DEL AGENTE",
+    "kb_preamble":                  "CÓMO USAR LA KNOWLEDGE BASE",
+    "user_template":                "TEMPLATE DE DATOS SEMANALES — NO BORRAR LAS LLAVES { }",
+    "market_analyst_system":        "PASO 1/4 — ANALISTA DE MERCADO (instrucciones)",
+    "market_analyst_user_template": "PASO 1/4 — ANALISTA DE MERCADO (template de datos, NO BORRAR LAS LLAVES { })",
+    "cadence_planner_system":       "PASO 2/4 — PLANIFICADOR DE CADENCIA (instrucciones)",
+    "cadence_planner_user_template": "PASO 2/4 — PLANIFICADOR DE CADENCIA (template de datos, NO BORRAR LAS LLAVES { })",
+    "copywriter_system":            "PASO 3/4 — REDACTOR DE COPY (instrucciones)",
+    "copywriter_user_template":     "PASO 3/4 — REDACTOR DE COPY (template de datos, NO BORRAR LAS LLAVES { })",
+    "humanizer_system":             "PASO 4/4 — HUMANIZADOR (instrucciones)",
+    "humanizer_user_template":      "PASO 4/4 — HUMANIZADOR (template de datos, NO BORRAR LAS LLAVES { })",
+    "perplexity_system":            "INSTRUCCIONES PARA LA BÚSQUEDA DE MERCADO (PERPLEXITY)",
+    "perplexity_query":             "QUÉ LE PREGUNTAMOS AL BUSCADOR DE MERCADO",
 }
 
 # Variables {...} que el código sustituye en tiempo de ejecución (ver anthropic_client.py
-# call_premium_agent / call_basic_agent) — si se borran del texto, el agente deja de recibir
-# ese dato sin ningún error visible. Por eso se bloquea el guardado si falta alguna.
+# call_basic_agent / call_market_analyst_agent / call_cadence_planner_agent /
+# call_copywriter_agent / call_humanizer_agent) — si se borran del texto, el agente deja
+# de recibir ese dato sin ningún error visible. Por eso se bloquea el guardado si falta
+# alguna Y la fila no está vacía.
 _REQUIRED_PLACEHOLDERS = {
-    ("premium", "user_template"): ["{semana_label}", "{shap_text}", "{research_text}", "{journey_text}"],
-    ("basic",   "user_template"): ["{fecha_hoy}", "{calendar_text}", "{journeys_text}"],
+    ("premium", "market_analyst_user_template"):   ["{semana_label}", "{shap_text}", "{research_text}"],
+    ("premium", "cadence_planner_user_template"):  ["{market_insights_text}", "{journey_text}"],
+    ("premium", "copywriter_user_template"):       ["{semana_label}", "{cadence_plan_text}"],
+    ("premium", "humanizer_user_template"):        ["{nodos_text}"],
+    ("basic",   "user_template"):                  ["{fecha_hoy}", "{calendar_text}", "{journeys_text}"],
 }
 
 _PROMPT_MARKER_RE = re.compile(r"<!--@prompt:(\w+)-->[ \t]*\n")
@@ -393,14 +433,18 @@ class FunnelClient:
 
     def get_prompt_composite(self, agent_type: str) -> dict[str, Any]:
         """
-        Une las 5 filas de funnel_prompts de un agent_type en un solo texto con
+        Une las filas de funnel_prompts de un agent_type en un solo texto con
         marcadores <!--@prompt:tipo--> — lo que ve/edita la UI de configuración.
         """
+        types_order = _PROMPT_TYPES_BY_AGENT.get(agent_type)
+        if types_order is None:
+            raise ValueError(f"agent_type desconocido: '{agent_type}'")
+
         rows = [r for r in self.get_all_prompts() if r["agent_type"] == agent_type]
         by_type = {r["prompt_type"]: r for r in rows}
 
         parts: list[str] = []
-        for prompt_type in _PROMPT_TYPES_ORDER:
+        for prompt_type in types_order:
             row = by_type.get(prompt_type)
             content = (row or {}).get("content") or ""
             title = _PROMPT_SECTION_TITLES[prompt_type]
@@ -422,7 +466,11 @@ class FunnelClient:
         """
         sections = _parse_prompt_composite(composite)
 
-        missing_sections = [pt for pt in _PROMPT_TYPES_ORDER if not sections.get(pt, "").strip()]
+        required_types = _PROMPT_TYPES_REQUIRED_BY_AGENT.get(agent_type)
+        if required_types is None:
+            raise ValueError(f"agent_type desconocido: '{agent_type}'")
+
+        missing_sections = [pt for pt in required_types if not sections.get(pt, "").strip()]
         if missing_sections:
             titles = ", ".join(_PROMPT_SECTION_TITLES[pt] for pt in missing_sections)
             raise ValueError(
@@ -448,8 +496,8 @@ class FunnelClient:
         current = {r["prompt_type"]: r["content"] for r in self.get_all_prompts() if r["agent_type"] == agent_type}
 
         updated: list[str] = []
-        for prompt_type in _PROMPT_TYPES_ORDER:
-            new_content = sections[prompt_type].strip()
+        for prompt_type in _PROMPT_TYPES_BY_AGENT[agent_type]:
+            new_content = sections.get(prompt_type, "").strip()
             if new_content != (current.get(prompt_type) or "").strip():
                 self.update_agent_prompt(agent_type, prompt_type, new_content)
                 updated.append(prompt_type)

@@ -61,6 +61,12 @@ _PERIOD_WORDS_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Montos en pesos/dólares (ej. "$200.000", "$55.000") — se cuentan junto con las tasas
+# para el tope de "una sola cifra por nodo" (ver validate_node_premium regla 6/7). No se
+# verifican contra el KB (sería un enriquecimiento aparte); solo cuentan como "una idea
+# cuantificada más" para detectar apilamiento de datos en un mismo mensaje.
+_MONEY_RE = re.compile(r"\$\s?\d{1,3}(?:[.,]\d{3})*(?:[.,]\d+)?")
+
 # Liquid — aperturas y cierres de bloque
 _LIQUID_OPEN  = re.compile(r"\{%-?\s*(?:if|unless|for|case)\b")
 _LIQUID_CLOSE = re.compile(r"\{%-?\s*end(?:if|unless|for|case)\b")
@@ -228,8 +234,8 @@ def validate_node(
                 f"Conjugación no permitida: '{m_voseo.group(0)}' — usar tuteo, no voseo"
             )
 
-    # ── 5. first_name sin wrapper (email) ─────────────────────────────────────
-    if tipo == "email" and "{{customer.first_name}}" in all_text:
+    # ── 5. first_name sin wrapper (cualquier canal — push también soporta Liquid) ──
+    if "{{customer.first_name}}" in all_text:
         if "{% if customer.first_name %}" not in all_text:
             errors.append(
                 f"{{{{customer.first_name}}}} sin wrapper — puede quedar vacío en usuarios sin nombre. "
@@ -347,8 +353,8 @@ def validate_node_premium(
                 f"Conjugación no permitida: '{m_voseo.group(0)}' — usar tuteo, no voseo"
             )
 
-    # ── 5. first_name sin wrapper (email) ─────────────────────────────────────
-    if tipo == "email" and "{{customer.first_name}}" in all_text:
+    # ── 5. first_name sin wrapper (cualquier canal — push también soporta Liquid) ──
+    if "{{customer.first_name}}" in all_text:
         if "{% if customer.first_name %}" not in all_text:
             errors.append(
                 f"{{{{customer.first_name}}}} sin wrapper — puede quedar vacío en usuarios sin nombre. "
@@ -360,18 +366,24 @@ def validate_node_premium(
     # decisión de producto: antes se prohibía cifra de mercado en subject/preheader a secas,
     # pero eso bloqueaba también cifras reales y verificadas; ahora la única barrera es que
     # la cifra esté grounded, no dónde aparece).
-    # Cifras de producto (CDT %, fondos): deben coincidir con el KB (±0.1%), sin restricción.
+    # Cifras de producto (CDT %, fondos): deben coincidir con el KB (±0.1%).
     # Cifras de mercado (COLCAP, TRM, tasas BanRep, S&P, Brent, etc.): deben coincidir con
-    # cifras_verificadas (grounded contra el research real), traer período explícito en
-    # algún lugar del nodo, y hay máximo 1 por nodo. Antes esta regla se saltaba cualquier
-    # número ≥100 sin chequear nada — eso dejaba pasar cifras como "160%" sin ninguna
-    # verificación; ahora todo número se valida contra alguna fuente.
+    # cifras_verificadas (grounded contra el research real) y traer período explícito en
+    # algún lugar del nodo. Antes esta regla se saltaba cualquier número ≥100 sin chequear
+    # nada — eso dejaba pasar cifras como "160%" sin ninguna verificación; ahora todo número
+    # se valida contra alguna fuente.
+    # Tope de "una sola idea cuantificada por nodo" (2026-07-21): antes solo se limitaban las
+    # cifras de MERCADO a 1 por nodo, y las de producto no tenían tope ni se contaban los
+    # montos ($) — eso dejaba pasar nodos con CDT% + tasa BanRep% + monto mínimo todos juntos,
+    # exactamente el "volcado de datos" que un push/email no debe tener (una idea, un dato).
+    # Ahora el tope de 1 aplica al TOTAL combinado (producto + mercado + montos).
     subject_plain   = _strip_liquid(subject)
     preheader_plain = _strip_liquid(preheader)
     cuerpo_plain    = _strip_liquid(cuerpo)
     node_plain      = f"{subject_plain} {preheader_plain} {cuerpo_plain}"
     kb_rate_list    = _kb_rates(kb_entries)
     cifras_verificadas = cifras_verificadas or []
+    product_matches: list[str] = []
     market_matches: list[str] = []
     for field_name, field_text in (("Subject", subject_plain), ("Preheader", preheader_plain), ("Cuerpo", cuerpo_plain)):
         for m_rate in _RATE_RE.finditer(field_text):
@@ -380,7 +392,8 @@ def validate_node_premium(
             except ValueError:
                 continue
             if _rate_in_kb(rate_num, kb_rate_list):
-                continue  # tasa de producto propio, válida en cualquier campo
+                product_matches.append(m_rate.group(0).strip())
+                continue
             if _rate_in_cifras(rate_num, cifras_verificadas):
                 market_matches.append(m_rate.group(0).strip())
             else:
@@ -390,10 +403,14 @@ def validate_node_premium(
                     "alucinación, verificala o eliminala"
                 )
 
-    if len(market_matches) > 1:
+    money_matches = [m.group(0).strip() for m in _MONEY_RE.finditer(node_plain)]
+    total_cifras  = product_matches + market_matches + money_matches
+
+    if len(total_cifras) > 1:
         errors.append(
-            f"El nodo menciona {len(market_matches)} cifras de mercado distintas "
-            f"({', '.join(market_matches)}) — máximo 1 por nodo"
+            f"El nodo menciona {len(total_cifras)} cifras distintas ({', '.join(total_cifras)}) — "
+            "máximo 1 cifra en total por nodo (de producto, de mercado o monto, sin importar el "
+            "tipo) — un mensaje debe tener una sola idea central, no varios datos apilados"
         )
     elif market_matches and not _PERIOD_WORDS_RE.search(node_plain):
         errors.append(

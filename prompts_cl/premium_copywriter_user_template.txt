@@ -1,0 +1,5 @@
+SEMANA: {semana_label}
+
+{cadence_plan_text}
+
+Responde SOLO JSON válido.

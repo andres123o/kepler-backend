@@ -104,6 +104,18 @@ def main() -> None:
         "premium_user_template.txt":        ("premium", "user_template"),
         "premium_perplexity_system.txt":    ("premium", "perplexity_system"),
         "premium_perplexity_query.txt":     ("premium", "perplexity_query"),
+        # Pipeline encadenado (chained_v2) — 3 pasos, cada uno system + user_template.
+        # Mismo contenido de texto sirve para cualquier funnel (CO/PE/CL/futuros): lo que
+        # cambia entre países es el KB/journey/mercado que se inyecta en runtime, no estas
+        # instrucciones. Se activa por funnel vía funnels.config.premium_agent.pipeline.
+        "premium_market_analyst_system.txt":        ("premium", "market_analyst_system"),
+        "premium_market_analyst_user_template.txt": ("premium", "market_analyst_user_template"),
+        "premium_cadence_planner_system.txt":        ("premium", "cadence_planner_system"),
+        "premium_cadence_planner_user_template.txt": ("premium", "cadence_planner_user_template"),
+        "premium_copywriter_system.txt":        ("premium", "copywriter_system"),
+        "premium_copywriter_user_template.txt": ("premium", "copywriter_user_template"),
+        "premium_humanizer_system.txt":         ("premium", "humanizer_system"),
+        "premium_humanizer_user_template.txt":  ("premium", "humanizer_user_template"),
         "basic_system.txt":                 ("basic",   "system"),
         "basic_kb_preamble.txt":            ("basic",   "kb_preamble"),
         "basic_user_template.txt":          ("basic",   "user_template"),

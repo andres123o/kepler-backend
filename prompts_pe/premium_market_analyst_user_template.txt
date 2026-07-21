@@ -1,0 +1,9 @@
+SEMANA: {semana_label}
+
+── BLOQUE 1: PROYECCIÓN Y SHAP ──
+{shap_text}
+
+── BLOQUE 2: RESEARCH DE MERCADO ──
+{research_text}
+
+Responde SOLO JSON válido.
